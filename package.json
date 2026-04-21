@@ -1,0 +1,56 @@
+{
+  "name": "rigshare-mcp",
+  "version": "1.1.2",
+  "mcpName": "io.github.RPER2001/rigshare",
+  "description": "Rent GPUs, robots, drones, and construction gear on RIGShare; also onboards equipment owners.",
+  "author": "RIGShare LLC <support@rigshare.app>",
+  "license": "MIT",
+  "homepage": "https://github.com/RPER2001/rigshare-mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RPER2001/rigshare-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RPER2001/rigshare-mcp/issues",
+    "email": "support@rigshare.app"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "rigshare",
+    "gpu",
+    "robotics",
+    "rental",
+    "marketplace",
+    "claude",
+    "cursor",
+    "ai-agents",
+    "construction"
+  ],
+  "type": "module",
+  "bin": {
+    "rigshare-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.RPER2001/rigshare",
+  "description": "Rent GPUs, robots, drones, and construction gear on RIGShare; also onboards equipment owners.",
+  "repository": {
+    "url": "https://github.com/RPER2001/rigshare-mcp",
+    "source": "github"
+  },
+  "version": "1.1.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "rigshare-mcp",
+      "version": "1.1.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "RIGShare API key (Bearer format). Required only for the authenticated tools: rigshare_list_my_bookings, rigshare_list_my_sessions, rigshare_create_booking. Without it, the four public read-only tools still work. Get a key at https://www.rigshare.app/profile#api-keys or contact support@rigshare.app.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "RIGSHARE_API_KEY"
+        }
+      ]
+    }
+  ]
+}
