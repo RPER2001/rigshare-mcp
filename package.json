@@ -23,9 +23,7 @@
     "rental",
     "marketplace",
     "claude",
-    "cursor",
-    "ai-agents",
-    "construction"
+    "ai-agents"
   ],
   "type": "module",
   "bin": {
@@ -35,7 +33,10 @@
     "dist",
     "README.md",
     "LICENSE",
-    "server.json"
+    "CHANGELOG.md",
+    "server.json",
+    "smithery.yaml",
+    "Dockerfile"
   ],
   "scripts": {
     "build": "tsc",
