@@ -20,7 +20,7 @@ FROM node:20-alpine
 # reproducible; bump when publishing new versions. The published
 # package already includes the compiled dist/index.js, so no build
 # step is needed inside the container.
-RUN npm install -g rigshare-mcp@1.1.2
+RUN npm install -g rigshare-mcp@1.1.3
 
 # The MCP server reads protocol on stdin, writes to stdout, and logs
 # to stderr. Glama/Smithery infrastructure wraps this stdio transport

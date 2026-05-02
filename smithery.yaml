@@ -26,7 +26,7 @@ startCommand:
         type: string
         title: RIGShare API Key
         description: >-
-          Bearer key, starts with rigsk_live_. Optional. Only needed
+          Bearer key, starts with rigs_live_. Optional. Only needed
           for the 3 authenticated tools. Stored encrypted by your MCP
           client; never transmitted back to smithery.ai or glama.ai.
         format: password
@@ -40,4 +40,4 @@ startCommand:
         : {}
     })
   exampleConfig:
-    apiKey: rigsk_live_example_get_a_real_one_at_rigshare_app
+    apiKey: rigs_live_example_get_a_real_one_at_rigshare_app

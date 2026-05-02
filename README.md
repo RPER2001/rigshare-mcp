@@ -153,7 +153,7 @@ Then point your MCP client at the local build by changing the config:
       "command": "npx",
       "args": ["-y", "rigshare-mcp"],
       "env": {
-        "RIGSHARE_API_KEY": "rigsk_live_..."
+        "RIGSHARE_API_KEY": "rigs_live_..."
       }
     }
   }
