@@ -27,7 +27,7 @@
   ],
   "type": "module",
   "bin": {
-    "rigshare-mcp": "./dist/index.js"
+    "rigshare-mcp": "dist/index.js"
   },
   "files": [
     "dist",
