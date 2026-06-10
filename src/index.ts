@@ -51,12 +51,14 @@ const RIGSHARE_AGENT_API =
 // enabled. Without it, those tools return a descriptive error pointing
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
-const USER_AGENT = "rigshare-mcp/1.0.0";
+// Keep in sync with package.json "version".
+const VERSION = "1.2.0";
+const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
   {
     name: "rigshare-mcp",
-    version: "1.0.0",
+    version: VERSION,
   },
   {
     capabilities: {
@@ -210,6 +212,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               "APPROVED",
               "CONFIRMED",
               "IN_PROGRESS",
+              "RETURN_PENDING",
               "COMPLETED",
               "CANCELLED",
               "REFUNDED",
@@ -244,8 +247,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "rigshare_create_booking",
-      description:
-        "REQUIRES API KEY (bookings:write scope). Creates a new RIGShare booking for the authenticated user. Server computes all prices from the equipment's canonical rates — client-side price hints are ignored. Enforces identity verification, security deposit hold, and a daily/monthly budget cap configured on the API key. Returns confirmation code + booking ID on success. Use rigshare_list_my_bookings to check status afterwards.",
+      description: [
+        "REQUIRES API KEY (bookings:write scope). Creates a new RIGShare booking",
+        "for the authenticated user. Server computes all prices from the",
+        "equipment's canonical rates — client-side price hints are ignored.",
+        "Enforces identity verification, security deposit hold, and the",
+        "daily/monthly budget cap configured on the API key.",
+        "METERED listings (billing.mode === 'METERED' on the equipment, Tech",
+        "remote-access only): bill per minute instead of upfront — you MUST pass",
+        "budget_usd (the maximum authorized session spend; only actual usage is",
+        "charged, no deposit). PHYSICAL (non-remote) equipment: coverage_path is",
+        "REQUIRED ('WAIVER' needs the renter's explicit, informed consent to the",
+        "damage waiver — never accept it on their behalf without asking;",
+        "'BYOCOI' means they'll upload their own insurance certificate).",
+        "Returns confirmation code + booking ID + payment status on success.",
+        "Use rigshare_list_my_bookings to check status afterwards.",
+      ].join(" "),
       inputSchema: {
         type: "object",
         required: ["equipment_id", "start_date", "end_date", "duration_type"],
@@ -284,11 +301,64 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Default REMOTE_ACCESS for robotics/AI equipment. Use SELF_PICKUP or OWNER_DELIVERY for construction equipment.",
           },
+          budget_usd: {
+            type: "number",
+            minimum: 0.5,
+            maximum: 25000,
+            description:
+              "REQUIRED for METERED listings; ignored otherwise. Maximum authorized session spend in USD (fees included). Charged only for minutes actually used; a 15-minute warning fires before the budget exhausts and the session can be extended.",
+          },
+          coverage_path: {
+            type: "string",
+            enum: ["WAIVER", "BYOCOI"],
+            description:
+              "REQUIRED for physical (non-remote) equipment. 'WAIVER' = renter accepts RIGShare's damage waiver (get the renter's explicit consent first); 'BYOCOI' = renter brings their own certificate of insurance (uploaded after booking). Remote-access bookings are exempt.",
+          },
+          waiver_version: {
+            type: "string",
+            maxLength: 50,
+            description:
+              "Version string of the waiver the renter accepted (shown on the equipment page / terms). Required when coverage_path is WAIVER.",
+          },
+          qualification_answers: {
+            type: "object",
+            additionalProperties: { type: "string", maxLength: 500 },
+            description:
+              "Renter qualification answers, keyed by question id — required when the equipment's qualification tier demands it (the server error names the missing questions).",
+          },
+          qualification_version: {
+            type: "string",
+            maxLength: 50,
+            description: "Version of the qualification questionnaire answered.",
+          },
           idempotency_key: {
             type: "string",
             maxLength: 100,
             description:
               "Optional. If provided, repeated calls with the same key within 5 minutes return the same booking instead of creating duplicates.",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_start_session",
+      description: [
+        "REQUIRES API KEY (sessions:write scope). Starts a remote session on a",
+        "CONFIRMED Robotics & AI booking (SSH / Jupyter / VNC / API access).",
+        "Returns the session access token — shown ONCE, store it securely —",
+        "plus the connection URL and allocated specs. For METERED bookings the",
+        "per-minute clock runs while the session is active; end the session or",
+        "the booking to settle for exact usage. Equipment that requires MFA",
+        "cannot be started via API key — the renter must use the web app.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["booking_id"],
+        properties: {
+          booking_id: {
+            type: "string",
+            format: "uuid",
+            description: "A CONFIRMED booking id from rigshare_create_booking or rigshare_list_my_bookings.",
           },
         },
       },
@@ -316,6 +386,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await listMySessions(args || {});
       case "rigshare_create_booking":
         return await createBooking(args || {});
+      case "rigshare_start_session":
+        return await startSession(args || {});
       default:
         return toolError(`Unknown tool: ${name}`);
     }
@@ -391,9 +463,13 @@ async function searchEquipment(args: Record<string, unknown>) {
           "location TBD",
         );
     const mfa = l.remote_access?.requires_mfa ? " · MFA required" : "";
+    const metered =
+      l.billing?.mode === "METERED"
+        ? " · METERED: billed per minute, booking needs budget_usd"
+        : "";
     return [
       `${i + 1}. ${l.title} (${l.division}/${l.category})`,
-      `   ${rateStr}${rateStr ? " · " : ""}${location}${mfa}`,
+      `   ${rateStr}${rateStr ? " · " : ""}${location}${mfa}${metered}`,
       `   Rating: ${l.rating?.average ?? "—"} (${l.rating?.count ?? 0} reviews)`,
       `   URL: ${l.url}`,
     ].join("\n");
@@ -424,12 +500,18 @@ async function getEquipment(args: Record<string, unknown>) {
     ? `Remote access: ${l.remote_access.access_type}${l.remote_access.region ? ` (${l.remote_access.region})` : ""}${l.remote_access.requires_mfa ? " · requires MFA" : ""}${l.remote_access.specs ? `\nSpecs: ${l.remote_access.specs}` : ""}`
     : `In-person pickup · ${l.location?.city || ""}, ${l.location?.state || ""}`;
 
+  const billing =
+    l.billing?.mode === "METERED"
+      ? `Billing: METERED — billed per minute of session time at $${l.billing.metered_rate_usd_per_hour ?? "?"}/hr. Booking authorizes a budget (pass budget_usd to rigshare_create_booking); only actual usage is charged, no deposit.`
+      : null;
+
   const description = [
     `${l.title}`,
     `Division: ${l.division} · Category: ${l.category}`,
     [l.make, l.model, l.year].filter(Boolean).join(" "),
     `Condition: ${l.condition || "unspecified"}`,
     `Rates: ${rates || "contact owner"}`,
+    billing,
     remote,
     `Owner: ${l.owner?.display_name || "—"}${l.owner?.verified ? " (ID verified)" : ""}`,
     `Rating: ${l.rating?.average ?? "—"} (${l.rating?.count ?? 0} reviews)`,
@@ -639,7 +721,17 @@ async function fetchAuthJson(
           `RIGShare Agent API returned HTTP ${res.status}`,
       };
     }
-    return { data, status: res.status };
+    // The agent API wraps every success payload as { data, success: true }
+    // (apiSuccess in app/_lib/api-auth.ts) — unwrap here so tool code reads
+    // payload fields directly. Pre-1.2.0 this was NOT unwrapped, which made
+    // list_my_bookings / list_my_sessions always report "none found" and
+    // create_booking report "—" for every field of a successfully created
+    // booking.
+    const payload =
+      data && typeof data === "object" && "success" in (data as any) && "data" in (data as any)
+        ? (data as any).data
+        : data;
+    return { data: payload, status: res.status };
   } catch (err: any) {
     return { error: err?.message || "Network error contacting RIGShare Agent API" };
   }
@@ -665,11 +757,17 @@ async function listMyBookings(args: Record<string, unknown>) {
     );
   }
   const lines = bookings.map((b, i) => {
+    const isMetered = b.billingMode === "METERED";
+    const moneyLine = isMetered
+      ? b.meterBilledCents != null
+        ? `   Metered (per-minute) · Settled: $${(b.meterBilledCents / 100).toFixed(2)} of $${((b.meterBudgetCents || 0) / 100).toFixed(2)} budget`
+        : `   Metered (per-minute) · Budget authorized: $${((b.meterBudgetCents || b.totalAmount || 0) / 100).toFixed(2)} — charged only for minutes used`
+      : `   Total: $${((b.totalAmount || 0) / 100).toFixed(2)} · Deposit: $${((b.securityDeposit || 0) / 100).toFixed(2)}`;
     return [
       `${i + 1}. ${b.confirmationCode} — ${b.status}`,
       `   ${b.equipment?.title || "—"} (${b.equipment?.category || "—"})`,
       `   ${new Date(b.startDate).toLocaleDateString()} → ${new Date(b.endDate).toLocaleDateString()} · ${b.durationType}`,
-      `   Total: $${((b.totalAmount || 0) / 100).toFixed(2)} · Deposit: $${((b.securityDeposit || 0) / 100).toFixed(2)}`,
+      moneyLine,
       `   Booking ID: ${b.id}`,
     ].join("\n");
   });
@@ -733,6 +831,15 @@ async function createBooking(args: Record<string, unknown>) {
     pickup_type: args.pickup_type || "REMOTE_ACCESS",
   };
   if (args.idempotency_key) body.idempotency_key = args.idempotency_key;
+  // METERED listings: dollars → cents for the authorized session budget.
+  if (typeof args.budget_usd === "number") {
+    body.meter_budget_cents = Math.round(args.budget_usd * 100);
+  }
+  // Coverage + qualification passthrough (physical equipment).
+  if (args.coverage_path) body.coverage_path = args.coverage_path;
+  if (args.waiver_version) body.waiver_version = args.waiver_version;
+  if (args.qualification_answers) body.qualification_answers = args.qualification_answers;
+  if (args.qualification_version) body.qualification_version = args.qualification_version;
 
   const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_AGENT_API}/bookings`, {
     method: "POST",
@@ -740,22 +847,90 @@ async function createBooking(args: Record<string, unknown>) {
   });
   if (res.error) return toolError(res.error);
 
-  const d = res.data as any;
-  const idempotent = d?.idempotent ? " (idempotent — matched existing booking)" : "";
+  // Response payload is FLAT (apiSuccess envelope already unwrapped by
+  // fetchAuthJson): booking_id, confirmation_code, status, total_amount,
+  // security_deposit, billing_mode, meter_budget_cents, url, payment{...}.
+  const d = (res.data || {}) as any;
+  const idempotent = d.idempotent ? " (idempotent — matched existing booking)" : "";
+  const bookingId = d.booking_id || "—";
+  const viewUrl = d.url || `https://www.rigshare.app/booking/${bookingId}`;
+  const isMetered = d.billing_mode === "METERED";
+
+  const moneyLines = isMetered
+    ? [
+        `Billing: METERED (per minute) — budget authorized: $${((d.meter_budget_cents || d.total_amount || 0) / 100).toFixed(2)}`,
+        `You are only charged for minutes used; no security deposit.`,
+      ]
+    : [
+        `Total: $${((d.total_amount || 0) / 100).toFixed(2)}`,
+        `Security deposit hold: $${((d.security_deposit || 0) / 100).toFixed(2)}`,
+      ];
+
+  const payment = d.payment || {};
+  const paymentLine =
+    payment.status === "paid"
+      ? "Payment: charged via auto-pay — booking is CONFIRMED."
+      : payment.status === "authorized"
+        ? "Payment: session budget hold authorized via auto-pay — booking is CONFIRMED."
+        : payment.status === "failed"
+          ? `Payment: auto-pay FAILED — ${payment.error || "complete payment manually"}. The renter must finish checkout at the booking URL.`
+          : "Payment: pending — the renter completes checkout after owner approval.";
+
   return toolText(
     [
       `Booking created${idempotent}:`,
       ``,
-      `Confirmation code: ${d?.confirmation_code || d?.booking?.confirmationCode || "—"}`,
-      `Booking ID: ${d?.booking_id || d?.booking?.id || "—"}`,
-      `Status: ${d?.booking?.status || "PENDING"}`,
-      `Total: $${((d?.booking?.totalAmount || 0) / 100).toFixed(2)}`,
-      `Security deposit hold: $${((d?.booking?.securityDeposit || 0) / 100).toFixed(2)}`,
+      `Confirmation code: ${d.confirmation_code || "—"}`,
+      `Booking ID: ${bookingId}`,
+      `Status: ${d.status || "PENDING"}`,
+      ...(d.idempotent ? [] : [...moneyLines, paymentLine]),
       ``,
-      `View at: https://www.rigshare.app/booking/${d?.booking_id || d?.booking?.id}`,
+      `View at: ${viewUrl}`,
       ``,
-      `Next steps: the owner will approve or decline. Use rigshare_list_my_bookings to check status.`,
+      `Next steps: ${d.status === "CONFIRMED" ? "the booking is confirmed" : "the owner will approve or decline"}. Use rigshare_list_my_bookings to check status${isMetered ? ", and rigshare_start_session to begin the remote session" : ""}.`,
     ].join("\n"),
+  );
+}
+
+/** Start a remote session on a confirmed Robotics & AI booking. */
+async function startSession(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
+    return toolError("booking_id must be a valid UUID");
+  }
+
+  const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_AGENT_API}/sessions`, {
+    method: "POST",
+    body: JSON.stringify({ booking_id: args.booking_id }),
+  });
+  if (res.error) return toolError(res.error);
+
+  const s = (res.data || {}) as any;
+  const specs = [
+    s.gpu_allocation ? `GPU: ${s.gpu_allocation}` : null,
+    s.cpu_cores ? `CPU cores: ${s.cpu_cores}` : null,
+    s.ram_gb ? `RAM: ${s.ram_gb} GB` : null,
+    s.storage_gb ? `Storage: ${s.storage_gb} GB` : null,
+  ].filter(Boolean);
+
+  return toolText(
+    [
+      `Remote session started:`,
+      ``,
+      `Session ID: ${s.session_id || "—"}`,
+      `Status: ${s.status || "provisioning"}`,
+      `Access type: ${s.access_type || "—"}`,
+      s.connection_url ? `Connection URL: ${s.connection_url}` : null,
+      s.access_token
+        ? `Access token (shown ONCE — store it securely, it cannot be retrieved again): ${s.access_token}`
+        : null,
+      specs.length ? specs.join(" · ") : null,
+      ``,
+      `If this booking is METERED, the per-minute clock is now running — end the session when done to settle for exact usage.`,
+    ]
+      .filter((l) => l !== null)
+      .join("\n"),
   );
 }
 
