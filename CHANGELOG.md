@@ -5,6 +5,22 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-06-10
+
+### Added
+- **`rigshare_create_listing`** — owners can now publish equipment listings
+  directly from an MCP client (equipment:write scope), for BOTH divisions:
+  construction gear and Robotics & AI hardware (remote-access config +
+  METERED per-minute billing supported). Photos are passed as https URLs
+  and ingested server-side — SSRF-validated fetch, content moderation,
+  watermarking, and re-hosting on RIGShare storage (hotlinks are never
+  stored). The backend routes through the same shared listing engine as
+  the web flow, so identity verification, Stripe Connect onboarding,
+  plan listing caps, text moderation, and the per-category qualification
+  floor all apply to API-created listings.
+- `rigshare_get_owner_onboarding` now tells agents about the direct
+  listing path when the owner has an API key.
+
 ## [1.2.0] - 2026-06-10
 
 ### Fixed

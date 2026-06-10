@@ -47,12 +47,15 @@ const RIGSHARE_API =
 // requires a Bearer API key + matching scopes.
 const RIGSHARE_AGENT_API =
   process.env.RIGSHARE_AGENT_API_BASE || "https://www.rigshare.app/api/v1/agent";
+// Owner-side sync surface (equipment create/list) lives at /api/v1, one
+// level above the agent namespace.
+const RIGSHARE_V1_API = RIGSHARE_AGENT_API.replace(/\/agent\/?$/, "");
 // Optional. If set, the write/auth tools (create_booking etc.) are
 // enabled. Without it, those tools return a descriptive error pointing
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
@@ -341,6 +344,104 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "rigshare_create_listing",
+      description: [
+        "REQUIRES API KEY (equipment:write scope). Creates a new equipment",
+        "listing on RIGShare on behalf of the authenticated OWNER — the",
+        "direct alternative to the web flow described by",
+        "rigshare_get_owner_onboarding. Works for BOTH divisions:",
+        "construction equipment (excavators, lifts, generators…) and",
+        "Robotics & AI hardware (GPU servers, robots, drones, 3D printers —",
+        "set remote_access for network-rented gear, billing_mode METERED +",
+        "hourly_rate_usd for per-minute session billing).",
+        "Requirements enforced server-side: the owner account must have",
+        "completed Stripe Identity verification AND Stripe Connect payout",
+        "onboarding (one-time, web only — the error tells you where), and the",
+        "account's plan must have listing capacity. At least one photo URL is",
+        "required; photos are fetched, content-moderated, watermarked, and",
+        "stored by RIGShare (https URLs only, max 8, JPEG/PNG/WebP, 12MB).",
+        "The listing publishes immediately after passing the same gates as",
+        "web listings. Confirm price and details with the owner before",
+        "calling — this publishes to a live marketplace.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["title", "description", "category", "make", "model", "year", "condition", "daily_rate_usd", "city", "state", "zip"],
+        properties: {
+          title: { type: "string", minLength: 5, maxLength: 120 },
+          description: {
+            type: "string",
+            minLength: 10,
+            maxLength: 5000,
+            description: "Honest, detailed description — specs, condition notes, what's included.",
+          },
+          category: {
+            type: "string",
+            description: "Exact category code — use rigshare_list_categories to discover valid values (e.g. GPU_COMPUTE, EXCAVATORS).",
+          },
+          make: { type: "string", maxLength: 80 },
+          model: { type: "string", maxLength: 80 },
+          year: { type: "integer", minimum: 1950, maximum: 2035 },
+          condition: { type: "string", enum: ["EXCELLENT", "GOOD", "FAIR"] },
+          daily_rate_usd: { type: "number", minimum: 1, maximum: 100000 },
+          hourly_rate_usd: {
+            type: "number",
+            minimum: 0,
+            maximum: 100000,
+            description: "Required when billing_mode is METERED (it is the per-minute metering basis).",
+          },
+          weekly_rate_usd: { type: "number", minimum: 0, maximum: 500000 },
+          monthly_rate_usd: { type: "number", minimum: 0, maximum: 2000000 },
+          city: { type: "string" },
+          state: { type: "string", description: "Two-letter US state code." },
+          zip: { type: "string", description: "5-digit US zip code." },
+          photos: {
+            type: "array",
+            minItems: 1,
+            maxItems: 8,
+            items: {
+              type: "object",
+              required: ["url"],
+              properties: {
+                url: { type: "string", format: "uri", description: "Public https image URL (JPEG/PNG/WebP, ≤12MB)." },
+                angle: { type: "string", maxLength: 32, description: "Optional label, e.g. 'front', 'side', 'controls'." },
+              },
+            },
+            description: "At least one. Ingested server-side: moderated, watermarked, re-hosted by RIGShare.",
+          },
+          booking_type: {
+            type: "string",
+            enum: ["INSTANT", "REQUEST"],
+            default: "REQUEST",
+            description: "INSTANT = renters book without owner approval; REQUEST = owner approves each booking.",
+          },
+          remote_access: {
+            type: "object",
+            description: "Robotics & AI categories only — configure how renters connect over the network.",
+            properties: {
+              access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
+              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint RIGShare proxies renter traffic to (SSRF-validated)." },
+              specs: { type: "string", maxLength: 2000, description: "Hardware specs shown to renters (e.g. '8× H100 80GB, 2TB NVMe')." },
+              region: { type: "string", maxLength: 100 },
+              max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
+              require_mfa: { type: "boolean", description: "Require TOTP MFA from renters before sessions (recommended for sensitive hardware)." },
+            },
+          },
+          billing_mode: {
+            type: "string",
+            enum: ["FIXED", "METERED"],
+            default: "FIXED",
+            description: "METERED = renters pay per minute of session time (remote-access Tech listings only; requires hourly_rate_usd).",
+          },
+          external_id: {
+            type: "string",
+            maxLength: 100,
+            description: "Optional inventory-system id — future calls with the same external_id update this listing instead of duplicating it.",
+          },
+        },
+      },
+    },
+    {
       name: "rigshare_start_session",
       description: [
         "REQUIRES API KEY (sessions:write scope). Starts a remote session on a",
@@ -386,6 +487,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await listMySessions(args || {});
       case "rigshare_create_booking":
         return await createBooking(args || {});
+      case "rigshare_create_listing":
+        return await createListing(args || {});
       case "rigshare_start_session":
         return await startSession(args || {});
       default:
@@ -669,7 +772,9 @@ function getOwnerOnboarding(args: Record<string, unknown>) {
     looksRoboticsAi
       ? "5. For remote-access gear: configure your endpoint URL (HTTPS required) + optional API key. RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
       : "5. Upload 4–5 angle photos (front, sides, back; 5 required for engine-based categories). Set your hourly/daily/weekly/monthly rates. Set availability and delivery radius.",
-    "6. Publish — RIGShare reviews the listing within 24h. Once live, renters can book immediately and you get a notification.",
+    "6. Publish — once live, renters can book immediately and you get a notification.",
+    "",
+    "**Listing directly from this chat:** if you have a RIGShare API key with the `equipment:write` scope (create one at https://www.rigshare.app/profile#api-keys after the one-time verification + payout setup above), the agent can publish the listing for you right now via the `rigshare_create_listing` tool — title, rates, photos (https URLs), and remote-access config for tech hardware. Identity verification and Stripe Connect onboarding still have to be done once on the web first.",
     "",
     "## Ongoing",
     "",
@@ -888,6 +993,90 @@ async function createBooking(args: Record<string, unknown>) {
       `View at: ${viewUrl}`,
       ``,
       `Next steps: ${d.status === "CONFIRMED" ? "the booking is confirmed" : "the owner will approve or decline"}. Use rigshare_list_my_bookings to check status${isMetered ? ", and rigshare_start_session to begin the remote session" : ""}.`,
+    ].join("\n"),
+  );
+}
+
+/** Create an equipment listing on behalf of the authenticated owner. */
+async function createListing(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  for (const field of ["title", "description", "category", "make", "model", "condition", "city", "state", "zip"]) {
+    if (!args[field] || typeof args[field] !== "string") {
+      return toolError(`${field} is required (string)`);
+    }
+  }
+  if (typeof args.year !== "number") return toolError("year is required (integer)");
+  if (typeof args.daily_rate_usd !== "number") return toolError("daily_rate_usd is required (number)");
+  const photos = Array.isArray(args.photos) ? args.photos : [];
+  if (photos.length === 0) {
+    return toolError("At least one photo is required — pass photos: [{url: 'https://…'}]. RIGShare moderates, watermarks, and re-hosts them.");
+  }
+
+  const remote = (args.remote_access || undefined) as Record<string, unknown> | undefined;
+  const body: Record<string, unknown> = {
+    title: args.title,
+    description: args.description,
+    category: args.category,
+    make: args.make,
+    model: args.model,
+    year: args.year,
+    condition: args.condition,
+    daily_rate: args.daily_rate_usd,
+    hourly_rate: args.hourly_rate_usd,
+    weekly_rate: args.weekly_rate_usd,
+    monthly_rate: args.monthly_rate_usd,
+    location: { city: args.city, state: args.state, zip: args.zip },
+    photos: photos.map((p: any) => (typeof p === "string" ? { url: p } : { url: p.url, angle: p.angle })),
+    booking_type: args.booking_type || "REQUEST",
+    billing_mode: args.billing_mode,
+    external_id: args.external_id,
+    ...(remote
+      ? {
+          remote_access: {
+            enabled: true,
+            access_type: remote.access_type,
+            endpoint: remote.endpoint,
+            specs: remote.specs,
+            region: remote.region,
+            max_concurrent: remote.max_concurrent,
+            require_mfa: remote.require_mfa,
+          },
+        }
+      : {}),
+  };
+
+  const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_V1_API}/equipment`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (res.error) return toolError(res.error);
+
+  const d = (res.data || {}) as any;
+  const eq = d.equipment || {};
+  const division = String(args.category).match(/GPU|ROBOTIC|HUMANOID|DRONES_TECH|AI_INFRA|ADDITIVE|IOT/)
+    ? "robotics-ai"
+    : "construction";
+  const listingUrl =
+    division === "robotics-ai"
+      ? `https://www.rigshare.app/robotics-ai/equipment/${eq.id}`
+      : `https://www.rigshare.app/equipment/${eq.id}`;
+  const photoNote =
+    d.photo_errors && d.photo_errors.length > 0
+      ? `\nPhotos: ${d.photos_ingested} ingested, ${d.photo_errors.length} FAILED — ${d.photo_errors.map((e: any) => `${e.url}: ${e.error}`).join("; ")}`
+      : `\nPhotos: ${d.photos_ingested ?? eq.photos?.length ?? 0} ingested (moderated + watermarked).`;
+
+  return toolText(
+    [
+      `Listing created:`,
+      ``,
+      `Listing ID: ${eq.id || "—"}`,
+      `Status: ${eq.status || "ACTIVE"}`,
+      `${eq.title || args.title} — $${args.daily_rate_usd}/day${eq.billing_mode === "METERED" ? ` · METERED at $${args.hourly_rate_usd}/hr (billed per minute)` : ""}`,
+      photoNote,
+      ``,
+      `Live at: ${listingUrl}`,
+      `Manage at: https://www.rigshare.app/dashboard`,
     ].join("\n"),
   );
 }
