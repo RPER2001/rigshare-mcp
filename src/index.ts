@@ -55,7 +55,7 @@ const RIGSHARE_V1_API = RIGSHARE_AGENT_API.replace(/\/agent\/?$/, "");
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
@@ -99,7 +99,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           category: {
             type: "string",
             description:
-              "Exact category code (e.g. GPU_COMPUTE, HUMANOID_ROBOTS, EXCAVATORS). Use rigshare_list_categories to discover valid values. Overrides division filter.",
+              "Exact category code (e.g. AI_COMPUTE, HUMANOID_ROBOTS, EXCAVATORS). Use rigshare_list_categories to discover valid values. Overrides division filter.",
           },
           remote_only: {
             type: "boolean",
@@ -111,6 +111,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             enum: ["SSH", "JUPYTER", "DESKTOP", "API"],
             description: "Filter to a specific remote access type.",
+          },
+          compute_architecture: {
+            type: "string",
+            enum: ["CUDA", "ROCM", "APPLE_SILICON", "TPU", "TRAINIUM", "CPU"],
+            description:
+              "For AI compute: filter by accelerator family. AI frameworks are architecture-locked (CUDA→NVIDIA, ROCM→AMD, APPLE_SILICON→Apple/MLX, TPU→Google, TRAINIUM→AWS), so match it to the workload.",
           },
           search: {
             type: "string",
@@ -377,7 +383,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           category: {
             type: "string",
-            description: "Exact category code — use rigshare_list_categories to discover valid values (e.g. GPU_COMPUTE, EXCAVATORS).",
+            description: "Exact category code — use rigshare_list_categories to discover valid values (e.g. AI_COMPUTE, EXCAVATORS).",
           },
           make: { type: "string", maxLength: 80 },
           model: { type: "string", maxLength: 80 },
@@ -420,11 +426,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Robotics & AI categories only — configure how renters connect over the network.",
             properties: {
               access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
-              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint RIGShare proxies renter traffic to (SSRF-validated)." },
+              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint RIGShare proxies renter traffic to (SSRF-validated). If the machine has no public IP (home/NAT'd box), leave this off and finish in the listing wizard at https://www.rigshare.app/robotics-ai/list — its \"Auto-provision a RIGShare tunnel\" step runs a one-line agent that assigns a secure public endpoint automatically. Tunnel-backed listings can't be created endpoint-less via API." },
               specs: { type: "string", maxLength: 2000, description: "Hardware specs shown to renters (e.g. '8× H100 80GB, 2TB NVMe')." },
               region: { type: "string", maxLength: 100 },
               max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
               require_mfa: { type: "boolean", description: "Require TOTP MFA from renters before sessions (recommended for sensitive hardware)." },
+              compute_architecture: {
+                type: "string",
+                enum: ["CUDA", "ROCM", "APPLE_SILICON", "TPU", "TRAINIUM", "CPU"],
+                description: "AI_COMPUTE listings: the accelerator family renters filter on (CUDA→NVIDIA, ROCM→AMD, APPLE_SILICON→Apple, TPU→Google, TRAINIUM→AWS).",
+              },
+              gpu_temp_ceiling: {
+                type: "integer",
+                minimum: 50,
+                maximum: 110,
+                description: "Optional safe GPU temperature ceiling (°C). RIGShare auto-pauses an overheating node; omit to use the platform default.",
+              },
             },
           },
           billing_mode: {
@@ -508,6 +525,7 @@ async function searchEquipment(args: Record<string, unknown>) {
   if (args.category) params.set("category", String(args.category));
   if (args.remote_only) params.set("remote_only", "true");
   if (args.access_type) params.set("access_type", String(args.access_type));
+  if (args.compute_architecture) params.set("compute_architecture", String(args.compute_architecture));
   if (args.search) params.set("search", String(args.search));
   if (args.city) params.set("city", String(args.city));
   if (args.state) params.set("state", String(args.state));
@@ -566,13 +584,14 @@ async function searchEquipment(args: Record<string, unknown>) {
           "location TBD",
         );
     const mfa = l.remote_access?.requires_mfa ? " · MFA required" : "";
+    const arch = l.compute_architecture ? ` · ${l.compute_architecture}` : "";
     const metered =
       l.billing?.mode === "METERED"
         ? " · METERED: billed per minute, booking needs budget_usd"
         : "";
     return [
       `${i + 1}. ${l.title} (${l.division}/${l.category})`,
-      `   ${rateStr}${rateStr ? " · " : ""}${location}${mfa}${metered}`,
+      `   ${rateStr}${rateStr ? " · " : ""}${location}${arch}${mfa}${metered}`,
       `   Rating: ${l.rating?.average ?? "—"} (${l.rating?.count ?? 0} reviews)`,
       `   URL: ${l.url}`,
     ].join("\n");
@@ -770,7 +789,7 @@ function getOwnerOnboarding(args: Record<string, unknown>) {
       ? "4. Go to **https://www.rigshare.app/robotics-ai/list** to create your first listing"
       : "4. Go to **https://www.rigshare.app/list-equipment** to create your first listing",
     looksRoboticsAi
-      ? "5. For remote-access gear: configure your endpoint URL (HTTPS required) + optional API key. RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
+      ? "5. For remote-access gear: configure your endpoint URL (HTTPS required) + optional API key. RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits. **No public IP? (home/NAT'd box)** — the listing wizard offers \"Auto-provision a RIGShare tunnel\": run a one-line agent on the machine and RIGShare assigns it a secure public endpoint (https://rig-<id>.tunnel.rigshare.app) automatically, so you don't have to port-forward. For AI_COMPUTE listings also set `compute_architecture` (CUDA/ROCM/APPLE_SILICON/TPU/TRAINIUM/CPU) so renters can filter by accelerator family."
       : "5. Upload 4–5 angle photos (front, sides, back; 5 required for engine-based categories). Set your hourly/daily/weekly/monthly rates. Set availability and delivery radius.",
     "6. Publish — once live, renters can book immediately and you get a notification.",
     "",
@@ -1041,6 +1060,8 @@ async function createListing(args: Record<string, unknown>) {
             region: remote.region,
             max_concurrent: remote.max_concurrent,
             require_mfa: remote.require_mfa,
+            compute_architecture: remote.compute_architecture,
+            gpu_temp_ceiling: remote.gpu_temp_ceiling,
           },
         }
       : {}),
