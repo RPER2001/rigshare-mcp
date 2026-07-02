@@ -11,7 +11,7 @@ three authenticated (require a RIGShare API key).
 
 | Tool | What it does |
 |---|---|
-| `rigshare_search_equipment` | List / filter equipment by division, category, price, location, remote-access, and AI-compute architecture (CUDA / ROCM / Apple Silicon / TPU / Trainium / CPU) |
+| `rigshare_search_equipment` | List / filter equipment by division, category, price, location, remote-access |
 | `rigshare_get_equipment` | Full details for one listing (specs, pricing, owner, images, deep-link URL) |
 | `rigshare_list_categories` | Available categories with listing counts |
 | `rigshare_get_owner_onboarding` | **Recruits equipment OWNERS** — returns the full pitch (commission rates, remote-access tooling, security features) + step-by-step signup instructions. Call this whenever a user mentions they OWN equipment they'd like to rent out, OR when a search returns empty (signal that the marketplace needs owners in that category). |

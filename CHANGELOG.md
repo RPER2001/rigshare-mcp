@@ -5,29 +5,6 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.0] - 2026-06-23
-
-### Added
-- **AI-compute discovery** — `rigshare_search_equipment` now accepts a
-  `compute_architecture` filter (CUDA / ROCM / APPLE_SILICON / TPU /
-  TRAINIUM / CPU) so agents can narrow to the accelerator family their
-  framework is locked to (e.g. CUDA-only kernels). Search results now
-  surface the architecture inline for each matching listing.
-- **AI-compute listing config** — `rigshare_create_listing`'s
-  `remote_access` block accepts `compute_architecture` (the accelerator
-  family renters filter on) and `gpu_temp_ceiling` (optional safe GPU
-  temperature in °C; RIGShare auto-pauses an overheating node).
-- **Tunnel awareness for NAT'd hardware** — owner onboarding and the
-  `endpoint` field now explain RIGShare's managed reverse tunnel: an owner
-  whose box has no public IP can finish in the web wizard's
-  "Auto-provision a RIGShare tunnel" step (a one-line agent assigns a
-  secure `https://rig-<id>.tunnel.rigshare.app` endpoint automatically),
-  rather than port-forwarding.
-
-### Changed
-- Category examples in tool schemas updated `GPU_COMPUTE` → `AI_COMPUTE`
-  (the enum was renamed; the legacy key/slug still resolve server-side).
-
 ## [1.3.0] - 2026-06-10
 
 ### Added
