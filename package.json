@@ -1,6 +1,6 @@
 {
   "name": "rigshare-mcp",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "mcpName": "io.github.RPER2001/rigshare",
   "description": "Rent GPUs, robots, drones, and construction gear on RIGShare; also onboards equipment owners.",
   "author": "RIGShare LLC <support@rigshare.app>",
@@ -42,10 +42,12 @@
     "build": "tsc",
     "prepare": "npm run build",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "tsc && node test/tools.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

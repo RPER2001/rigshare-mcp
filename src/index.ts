@@ -33,12 +33,12 @@
  *     }
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // Single source of truth for the RIGShare host. Every API base derives from
 // it, so pointing the server at staging/self-hosted is one env var. Trailing
@@ -68,10 +68,10 @@ const RIGSHARE_V1_API =
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.6.0";
+const VERSION = "2.0.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
-const server = new Server(
+const server = new McpServer(
   {
     name: "rigshare-mcp",
     version: VERSION,
@@ -83,835 +83,576 @@ const server = new Server(
   },
 );
 
-// ─── Tool definitions ───────────────────────────────────────────────
+// Shape of every tool's return payload (a single text block, optionally an
+// error) — structurally the MCP CallToolResult content shape.
+type ToolResult = {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+};
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+/**
+ * Thin wrapper over McpServer.registerTool that preserves the pre-2.0 top-level
+ * error behavior: any throw inside a tool handler is logged to stderr (stdout is
+ * reserved for MCP protocol traffic) and surfaced to the model as a single
+ * generic, non-leaky message — identical to the old CallTool try/catch. Input is
+ * auto-validated against `inputSchema` (Zod) before the handler runs.
+ */
+function registerRigTool(
+  name: string,
+  config: {
+    title: string;
+    description: string;
+    inputSchema: z.ZodRawShape;
+    annotations: ToolAnnotations;
+  },
+  handler: (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>,
+): void {
+  server.registerTool(
+    name,
     {
-      name: "rigshare_search_equipment",
-      description: [
-        "Search RIGShare's rental equipment marketplace by filters.",
-        "Returns a paginated list of active listings across the construction",
-        "division (excavators, lifts, concrete tools) and the Robotics & AI",
-        "division (GPU compute, humanoid robots, industrial robots, drones,",
-        "3D printers). Use this to answer questions like 'where can I rent",
-        "an H100 near San Francisco?' or 'find a humanoid robot under",
-        "$200/day'. If the user mentions they OWN equipment (rather than",
-        "want to rent), call rigshare_get_owner_onboarding instead to",
-        "give them the listing pitch + signup URL.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        properties: {
-          division: {
-            type: "string",
-            enum: ["all", "construction", "robotics-ai"],
-            default: "all",
-            description: "Restrict to one division or search all.",
-          },
-          category: {
-            type: "string",
-            description:
-              "Exact category code (e.g. AI_COMPUTE, HUMANOID_ROBOTS, EXCAVATORS). Use rigshare_list_categories to discover valid values. Overrides division filter.",
-          },
-          remote_only: {
-            type: "boolean",
-            default: false,
-            description:
-              "If true, only return listings with remote access enabled (SSH / Jupyter / VNC / API).",
-          },
-          access_type: {
-            type: "string",
-            enum: ["SSH", "JUPYTER", "DESKTOP", "API"],
-            description: "Filter to a specific remote access type.",
-          },
-          compute_architecture: {
-            type: "string",
-            enum: ["CUDA", "ROCM", "APPLE_SILICON", "TPU", "TRAINIUM", "CPU"],
-            description:
-              "Accelerator family for AI compute listings (mainly AI_COMPUTE). AI frameworks are architecture-locked, so filter to what the workload can run on: CUDA = NVIDIA, ROCM = AMD, APPLE_SILICON, TPU = Google, TRAINIUM = AWS, CPU = no accelerator.",
-          },
-          search: {
-            type: "string",
-            description: "Free-text search against the listing title.",
-          },
-          min_price_daily_usd: {
-            type: "number",
-            description: "Minimum daily rate in USD.",
-          },
-          max_price_daily_usd: {
-            type: "number",
-            description: "Maximum daily rate in USD.",
-          },
-          city: { type: "string" },
-          state: {
-            type: "string",
-            description: "Two-letter US state code.",
-          },
-          sort: {
-            type: "string",
-            enum: ["newest", "price_asc", "price_desc", "rating"],
-            default: "newest",
-          },
-          page: { type: "integer", minimum: 1, default: 1 },
-          limit: {
-            type: "integer",
-            minimum: 1,
-            maximum: 100,
-            default: 10,
-            description: "Results per page (max 100).",
-          },
-        },
-      },
+      title: config.title,
+      description: config.description,
+      inputSchema: config.inputSchema,
+      annotations: config.annotations,
     },
-    {
-      name: "rigshare_get_equipment",
-      description:
-        "Fetch full details for a single RIGShare equipment listing by its UUID. Returns specs, pricing, owner info, images, and a deep-link URL for booking.",
-      inputSchema: {
-        type: "object",
-        required: ["id"],
-        properties: {
-          id: {
-            type: "string",
-            format: "uuid",
-            description: "Equipment UUID (obtained from search_equipment results).",
-          },
-        },
-      },
+    (async (args: Record<string, unknown>) => {
+      try {
+        return await handler(args || {});
+      } catch (err: any) {
+        console.error(
+          `[rigshare-mcp] tool "${name}" threw:`,
+          err?.stack || err?.message || err,
+        );
+        return toolError(
+          "The RIGShare MCP server hit an unexpected error. Check the server logs (stderr) for details.",
+        );
+      }
+    }) as any,
+  );
+}
+
+// ─── Tool definitions (registered on the modern McpServer surface) ──────
+
+registerRigTool(
+  "rigshare_search_equipment",
+  {
+    title: "Search equipment",
+    description: [
+      "Search RIGShare's rental equipment marketplace by filters.",
+      "Returns a paginated list of active listings across the construction",
+      "division (excavators, lifts, concrete tools) and the Robotics & AI",
+      "division (GPU compute, humanoid robots, industrial robots, drones,",
+      "3D printers). Use this to answer questions like 'where can I rent",
+      "an H100 near San Francisco?' or 'find a humanoid robot under",
+      "$200/day'. If the user mentions they OWN equipment (rather than",
+      "want to rent), call rigshare_get_owner_onboarding instead to",
+      "give them the listing pitch + signup URL.",
+    ].join(" "),
+    inputSchema: {
+      division: z.enum(["all", "construction", "robotics-ai"]).optional(),
+      category: z.string().optional(),
+      remote_only: z.boolean().optional(),
+      access_type: z.enum(["SSH", "JUPYTER", "DESKTOP", "API"]).optional(),
+      compute_architecture: z
+        .enum(["CUDA", "ROCM", "APPLE_SILICON", "TPU", "TRAINIUM", "CPU"])
+        .optional(),
+      search: z.string().optional(),
+      min_price_daily_usd: z.number().optional(),
+      max_price_daily_usd: z.number().optional(),
+      city: z.string().optional(),
+      state: z.string().optional(),
+      sort: z.enum(["newest", "price_asc", "price_desc", "rating"]).optional(),
+      page: z.number().int().min(1).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
     },
-    {
-      name: "rigshare_list_categories",
-      description:
-        "Returns all equipment categories that have at least one active listing, with per-category listing counts and descriptions. Useful for narrowing a search or helping a user discover what's available.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  searchEquipment,
+);
+
+registerRigTool(
+  "rigshare_get_equipment",
+  {
+    title: "Get equipment details",
+    description:
+      "Fetch full details for a single RIGShare equipment listing by its UUID. Returns specs, pricing, owner info, images, and a deep-link URL for booking.",
+    inputSchema: {
+      id: z.string().uuid(),
     },
-    {
-      name: "rigshare_get_owner_onboarding",
-      description: [
-        "Returns the full RIGShare pitch + step-by-step process for equipment",
-        "OWNERS who want to list their hardware for rent and earn recurring",
-        "revenue. Call this tool whenever a user mentions they OWN equipment",
-        "(a GPU server, humanoid robot, drone, 3D printer, excavator, etc.)",
-        "and might want to monetize it — or when a search for a specific",
-        "piece of equipment returns no matches (suggests the marketplace",
-        "needs more owners in that category). Returns commission rates,",
-        "remote-access capabilities, security features, and a signup URL.",
-        "Unauthenticated — always safe to call.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        properties: {
-          equipment_type: {
-            type: "string",
-            description:
-              "Optional. What the user owns (e.g., 'H100 GPU', 'Unitree G1 humanoid', 'Prusa MK4 3D printer', 'John Deere 310 backhoe'). The response is tailored to the category — robotics/AI pitch emphasizes remote-access + SSH/API tooling, construction pitch emphasizes GPS tracking + insurance + deposit holds.",
-          },
-          division_hint: {
-            type: "string",
-            enum: ["construction", "robotics-ai", "unknown"],
-            description:
-              "Optional. Which division to emphasize. Omit if unsure.",
-          },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  getEquipment,
+);
+
+registerRigTool(
+  "rigshare_list_categories",
+  {
+    title: "List categories",
+    description:
+      "Returns all equipment categories that have at least one active listing, with per-category listing counts and descriptions. Useful for narrowing a search or helping a user discover what's available.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  () => listCategories(),
+);
+
+registerRigTool(
+  "rigshare_get_owner_onboarding",
+  {
+    title: "Owner onboarding guide",
+    description: [
+      "Returns the full RIGShare pitch + step-by-step process for equipment",
+      "OWNERS who want to list their hardware for rent and earn recurring",
+      "revenue. Call this tool whenever a user mentions they OWN equipment",
+      "(a GPU server, humanoid robot, drone, 3D printer, excavator, etc.)",
+      "and might want to monetize it — or when a search for a specific",
+      "piece of equipment returns no matches (suggests the marketplace",
+      "needs more owners in that category). Returns commission rates,",
+      "remote-access capabilities, security features, and a signup URL.",
+      "Unauthenticated — always safe to call.",
+    ].join(" "),
+    inputSchema: {
+      equipment_type: z.string().optional(),
+      division_hint: z.enum(["construction", "robotics-ai", "unknown"]).optional(),
     },
-    // ── Authenticated tools (require RIGSHARE_API_KEY env var) ──
-    {
-      name: "rigshare_list_my_bookings",
-      description:
-        "REQUIRES API KEY (RIGSHARE_API_KEY env var, bookings:read scope). Returns the authenticated user's RIGShare bookings — equipment, dates, status, totals. Use this to check an existing rental before creating a new one, or to track a confirmation code.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          status: {
-            type: "string",
-            enum: [
-              "PENDING",
-              "APPROVED",
-              "CONFIRMED",
-              "IN_PROGRESS",
-              "RETURN_PENDING",
-              "COMPLETED",
-              "CANCELLED",
-              "REFUNDED",
-              "DISPUTED",
-            ],
-            description: "Filter to a specific booking status.",
-          },
-          limit: {
-            type: "integer",
-            minimum: 1,
-            maximum: 100,
-            default: 10,
-          },
-          page: { type: "integer", minimum: 1, default: 1 },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  getOwnerOnboarding,
+);
+
+registerRigTool(
+  "rigshare_list_my_bookings",
+  {
+    title: "List my bookings",
+    description:
+      "REQUIRES API KEY (RIGSHARE_API_KEY env var, bookings:read scope). Returns the authenticated user's RIGShare bookings — equipment, dates, status, totals. Use this to check an existing rental before creating a new one, or to track a confirmation code.",
+    inputSchema: {
+      status: z
+        .enum([
+          "PENDING",
+          "APPROVED",
+          "CONFIRMED",
+          "IN_PROGRESS",
+          "RETURN_PENDING",
+          "COMPLETED",
+          "CANCELLED",
+          "REFUNDED",
+          "DISPUTED",
+        ])
+        .optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+      page: z.number().int().min(1).optional(),
     },
-    {
-      name: "rigshare_list_my_sessions",
-      description:
-        "REQUIRES API KEY (sessions:read scope). Lists the authenticated user's remote sessions on Robotics & AI bookings — status, GPU allocation, total compute hours, cost so far. Use before starting a new session to check if one is already active.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          booking_id: { type: "string", format: "uuid" },
-          status: {
-            type: "string",
-            enum: ["provisioning", "active", "paused", "terminated", "failed"],
-          },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  listMyBookings,
+);
+
+registerRigTool(
+  "rigshare_list_my_sessions",
+  {
+    title: "List my sessions",
+    description:
+      "REQUIRES API KEY (sessions:read scope). Lists the authenticated user's remote sessions on Robotics & AI bookings — status, GPU allocation, total compute hours, cost so far. Use before starting a new session to check if one is already active.",
+    inputSchema: {
+      booking_id: z.string().uuid().optional(),
+      status: z
+        .enum(["provisioning", "active", "paused", "terminated", "failed"])
+        .optional(),
     },
-    {
-      name: "rigshare_quote_booking",
-      description: [
-        "REQUIRES API KEY (bookings:read scope). DRY-RUN price quote — computes the",
-        "EXACT cost a rigshare_create_booking would charge, but creates nothing and",
-        "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
-        "the renter the full breakdown and get their consent before any money",
-        "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
-        "server-side), the security-deposit authorization hold (15%, min $100 — 0",
-        "for METERED), delivery, coverage/egress, and the grand total, all in cents",
-        "plus formatted USD. Prices are recomputed server-side from the equipment's",
-        "canonical rates and the renter's tier — identical to what booking charges;",
-        "no client price is trusted. METERED (per-minute Tech) listings return the",
-        "per-hour rate, the minimum session budget, and budget presets instead of a",
-        "fixed total (no deposit). Sales tax is added at checkout and not included",
-        "in the estimate. Same inputs as rigshare_create_booking minus",
-        "idempotency_key.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["equipment_id", "start_date", "end_date", "duration_type"],
-        properties: {
-          equipment_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "From rigshare_search_equipment or rigshare_get_equipment.",
-          },
-          start_date: {
-            type: "string",
-            format: "date-time",
-            description: "ISO-8601 start datetime.",
-          },
-          end_date: {
-            type: "string",
-            format: "date-time",
-            description: "ISO-8601 end datetime. Must be after start_date.",
-          },
-          duration_type: {
-            type: "string",
-            enum: ["HOURLY", "FOUR_HOURS", "DAILY", "WEEKLY", "MONTHLY"],
-            description:
-              "Determines which rate is used. Must match a rate the equipment actually offers.",
-          },
-          pickup_type: {
-            type: "string",
-            enum: ["SELF_PICKUP", "OWNER_DELIVERY", "REMOTE_ACCESS"],
-            default: "REMOTE_ACCESS",
-            description:
-              "Affects the delivery line. Default REMOTE_ACCESS for robotics/AI; use SELF_PICKUP or OWNER_DELIVERY for construction equipment.",
-          },
-          budget_usd: {
-            type: "number",
-            minimum: 0.5,
-            maximum: 25000,
-            description:
-              "Ignored for the quote (METERED quotes return the minimum budget + presets to choose from). Accepted for input-shape parity with rigshare_create_booking.",
-          },
-          coverage_path: {
-            type: "string",
-            enum: ["WAIVER", "BYOCOI"],
-            description:
-              "Accepted for parity with rigshare_create_booking; does not change the quoted price.",
-          },
-          waiver_version: { type: "string", maxLength: 50 },
-          qualification_answers: {
-            type: "object",
-            additionalProperties: { type: "string", maxLength: 500 },
-          },
-          qualification_version: { type: "string", maxLength: 50 },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  listMySessions,
+);
+
+registerRigTool(
+  "rigshare_quote_booking",
+  {
+    title: "Quote booking (dry run)",
+    description: [
+      "REQUIRES API KEY (bookings:read scope). DRY-RUN price quote — computes the",
+      "EXACT cost a rigshare_create_booking would charge, but creates nothing and",
+      "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
+      "the renter the full breakdown and get their consent before any money",
+      "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
+      "server-side), the security-deposit authorization hold (15%, min $100 — 0",
+      "for METERED), delivery, coverage/egress, and the grand total, all in cents",
+      "plus formatted USD. Prices are recomputed server-side from the equipment's",
+      "canonical rates and the renter's tier — identical to what booking charges;",
+      "no client price is trusted. METERED (per-minute Tech) listings return the",
+      "per-hour rate, the minimum session budget, and budget presets instead of a",
+      "fixed total (no deposit). Sales tax is added at checkout and not included",
+      "in the estimate. Same inputs as rigshare_create_booking minus",
+      "idempotency_key.",
+    ].join(" "),
+    inputSchema: {
+      equipment_id: z.string().uuid(),
+      start_date: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time"),
+      end_date: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time"),
+      duration_type: z.enum(["HOURLY", "FOUR_HOURS", "DAILY", "WEEKLY", "MONTHLY"]),
+      pickup_type: z
+        .enum(["SELF_PICKUP", "OWNER_DELIVERY", "REMOTE_ACCESS"])
+        .optional(),
+      budget_usd: z.number().min(0.5).max(25000).optional(),
+      coverage_path: z.enum(["WAIVER", "BYOCOI"]).optional(),
+      waiver_version: z.string().max(50).optional(),
+      qualification_answers: z.record(z.string().max(500)).optional(),
+      qualification_version: z.string().max(50).optional(),
     },
-    {
-      name: "rigshare_create_booking",
-      description: [
-        "REQUIRES API KEY (bookings:write scope). Creates a new RIGShare booking",
-        "for the authenticated user. Call rigshare_quote_booking FIRST to preview",
-        "the exact cost (dry-run, nothing charged) and confirm it with the renter",
-        "before committing money here. Server computes all prices from the",
-        "equipment's canonical rates — client-side price hints are ignored.",
-        "Enforces identity verification, security deposit hold, and the",
-        "daily/monthly budget cap configured on the API key.",
-        "METERED listings (billing.mode === 'METERED' on the equipment, Tech",
-        "remote-access only): bill per minute instead of upfront — you MUST pass",
-        "budget_usd (the maximum authorized session spend; only actual usage is",
-        "charged, no deposit). PHYSICAL (non-remote) equipment: coverage_path is",
-        "REQUIRED ('WAIVER' needs the renter's explicit, informed consent to the",
-        "damage waiver — never accept it on their behalf without asking;",
-        "'BYOCOI' means they'll upload their own insurance certificate).",
-        "Returns confirmation code + booking ID + payment status on success.",
-        "Use rigshare_list_my_bookings to check status afterwards.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["equipment_id", "start_date", "end_date", "duration_type"],
-        properties: {
-          equipment_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "From rigshare_search_equipment or rigshare_get_equipment.",
-          },
-          start_date: {
-            type: "string",
-            format: "date-time",
-            description: "ISO-8601 start datetime.",
-          },
-          end_date: {
-            type: "string",
-            format: "date-time",
-            description: "ISO-8601 end datetime. Must be after start_date.",
-          },
-          duration_type: {
-            type: "string",
-            enum: ["HOURLY", "FOUR_HOURS", "DAILY", "WEEKLY", "MONTHLY"],
-            description:
-              "Determines which rate is used. Must match a rate the equipment actually offers (e.g., use HOURLY only when equipment has a rateHourly).",
-          },
-          pickup_type: {
-            type: "string",
-            enum: [
-              "SELF_PICKUP",
-              "OWNER_DELIVERY",
-              "REMOTE_ACCESS",
-            ],
-            default: "REMOTE_ACCESS",
-            description:
-              "Default REMOTE_ACCESS for robotics/AI equipment. Use SELF_PICKUP or OWNER_DELIVERY for construction equipment.",
-          },
-          budget_usd: {
-            type: "number",
-            minimum: 0.5,
-            maximum: 25000,
-            description:
-              "REQUIRED for METERED listings; ignored otherwise. Maximum authorized session spend in USD (fees included). Charged only for minutes actually used; a 15-minute warning fires before the budget exhausts and the session can be extended.",
-          },
-          coverage_path: {
-            type: "string",
-            enum: ["WAIVER", "BYOCOI"],
-            description:
-              "REQUIRED for physical (non-remote) equipment. 'WAIVER' = renter accepts RIGShare's damage waiver (get the renter's explicit consent first); 'BYOCOI' = renter brings their own certificate of insurance (uploaded after booking). Remote-access bookings are exempt.",
-          },
-          waiver_version: {
-            type: "string",
-            maxLength: 50,
-            description:
-              "Version string of the waiver the renter accepted (shown on the equipment page / terms). Required when coverage_path is WAIVER.",
-          },
-          qualification_answers: {
-            type: "object",
-            additionalProperties: { type: "string", maxLength: 500 },
-            description:
-              "Renter qualification answers, keyed by question id — required when the equipment's qualification tier demands it (the server error names the missing questions).",
-          },
-          qualification_version: {
-            type: "string",
-            maxLength: 50,
-            description: "Version of the qualification questionnaire answered.",
-          },
-          idempotency_key: {
-            type: "string",
-            maxLength: 100,
-            description:
-              "Optional. If provided, repeated calls with the same key within 5 minutes return the same booking instead of creating duplicates.",
-          },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  quoteBooking,
+);
+
+registerRigTool(
+  "rigshare_create_booking",
+  {
+    title: "Create booking",
+    description: [
+      "REQUIRES API KEY (bookings:write scope). Creates a new RIGShare booking",
+      "for the authenticated user. Call rigshare_quote_booking FIRST to preview",
+      "the exact cost (dry-run, nothing charged) and confirm it with the renter",
+      "before committing money here. Server computes all prices from the",
+      "equipment's canonical rates — client-side price hints are ignored.",
+      "Enforces identity verification, security deposit hold, and the",
+      "daily/monthly budget cap configured on the API key.",
+      "METERED listings (billing.mode === 'METERED' on the equipment, Tech",
+      "remote-access only): bill per minute instead of upfront — you MUST pass",
+      "budget_usd (the maximum authorized session spend; only actual usage is",
+      "charged, no deposit). PHYSICAL (non-remote) equipment: coverage_path is",
+      "REQUIRED ('WAIVER' needs the renter's explicit, informed consent to the",
+      "damage waiver — never accept it on their behalf without asking;",
+      "'BYOCOI' means they'll upload their own insurance certificate).",
+      "Returns confirmation code + booking ID + payment status on success.",
+      "Use rigshare_list_my_bookings to check status afterwards.",
+    ].join(" "),
+    inputSchema: {
+      equipment_id: z.string().uuid(),
+      start_date: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time"),
+      end_date: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time"),
+      duration_type: z.enum(["HOURLY", "FOUR_HOURS", "DAILY", "WEEKLY", "MONTHLY"]),
+      pickup_type: z
+        .enum(["SELF_PICKUP", "OWNER_DELIVERY", "REMOTE_ACCESS"])
+        .optional(),
+      budget_usd: z.number().min(0.5).max(25000).optional(),
+      coverage_path: z.enum(["WAIVER", "BYOCOI"]).optional(),
+      waiver_version: z.string().max(50).optional(),
+      qualification_answers: z.record(z.string().max(500)).optional(),
+      qualification_version: z.string().max(50).optional(),
+      idempotency_key: z.string().max(100).optional(),
     },
-    {
-      name: "rigshare_create_listing",
-      description: [
-        "REQUIRES API KEY (equipment:write scope). Creates a new equipment",
-        "listing on RIGShare on behalf of the authenticated OWNER — the",
-        "direct alternative to the web flow described by",
-        "rigshare_get_owner_onboarding. Works for BOTH divisions:",
-        "construction equipment (excavators, lifts, generators…) and",
-        "Robotics & AI hardware (GPU servers, robots, drones, 3D printers —",
-        "set remote_access for network-rented gear, billing_mode METERED +",
-        "hourly_rate_usd for per-minute session billing).",
-        "Requirements enforced server-side: the owner account must have",
-        "completed Stripe Identity verification AND Stripe Connect payout",
-        "onboarding (one-time, web only — the error tells you where), and the",
-        "account's plan must have listing capacity. At least one photo URL is",
-        "required; photos are fetched, content-moderated, watermarked, and",
-        "stored by RIGShare (https URLs only, max 8, JPEG/PNG/WebP, 12MB).",
-        "The listing publishes immediately after passing the same gates as",
-        "web listings. Confirm price and details with the owner before",
-        "calling — this publishes to a live marketplace.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["title", "description", "category", "make", "model", "year", "condition", "daily_rate_usd", "city", "state", "zip"],
-        properties: {
-          title: { type: "string", minLength: 5, maxLength: 120 },
-          description: {
-            type: "string",
-            minLength: 10,
-            maxLength: 5000,
-            description: "Honest, detailed description — specs, condition notes, what's included.",
-          },
-          category: {
-            type: "string",
-            description: "Exact category code — use rigshare_list_categories to discover valid values (e.g. AI_COMPUTE, EXCAVATORS).",
-          },
-          make: { type: "string", maxLength: 80 },
-          model: { type: "string", maxLength: 80 },
-          year: { type: "integer", minimum: 1950, maximum: 2035 },
-          condition: { type: "string", enum: ["EXCELLENT", "GOOD", "FAIR"] },
-          daily_rate_usd: { type: "number", minimum: 1, maximum: 100000 },
-          hourly_rate_usd: {
-            type: "number",
-            minimum: 0,
-            maximum: 100000,
-            description: "Required when billing_mode is METERED (it is the per-minute metering basis).",
-          },
-          weekly_rate_usd: { type: "number", minimum: 0, maximum: 500000 },
-          monthly_rate_usd: { type: "number", minimum: 0, maximum: 2000000 },
-          city: { type: "string" },
-          state: { type: "string", description: "Two-letter US state code." },
-          zip: { type: "string", description: "5-digit US zip code." },
-          photos: {
-            type: "array",
-            minItems: 1,
-            maxItems: 8,
-            items: {
-              type: "object",
-              required: ["url"],
-              properties: {
-                url: { type: "string", format: "uri", description: "Public https image URL (JPEG/PNG/WebP, ≤12MB)." },
-                angle: { type: "string", maxLength: 32, description: "Optional label, e.g. 'front', 'side', 'controls'." },
-              },
-            },
-            description: "At least one. Ingested server-side: moderated, watermarked, re-hosted by RIGShare.",
-          },
-          booking_type: {
-            type: "string",
-            enum: ["INSTANT", "REQUEST"],
-            default: "REQUEST",
-            description: "INSTANT = renters book without owner approval; REQUEST = owner approves each booking.",
-          },
-          remote_access: {
-            type: "object",
-            description:
-              "Robotics & AI categories only — configure how renters connect over the network. When provided, security_ack MUST be true or the listing cannot be published.",
-            required: ["security_ack"],
-            properties: {
-              access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
-              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint RIGShare proxies renter traffic to (SSRF-validated)." },
-              specs: { type: "string", maxLength: 2000, description: "Hardware specs shown to renters (e.g. '8× H100 80GB, 2TB NVMe')." },
-              region: { type: "string", maxLength: 100 },
-              max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
-              require_mfa: { type: "boolean", description: "Require TOTP MFA from renters before sessions (recommended for sensitive hardware)." },
-              security_ack: {
-                type: "boolean",
-                description:
-                  "REQUIRED WHEN remote_access is provided. You attest the endpoint is secured and you accept RIGShare's Terms & Liability Waiver. Required to publish any remote-access listing — the backend hard-rejects a remote create without it.",
-              },
-            },
-          },
-          billing_mode: {
-            type: "string",
-            enum: ["FIXED", "METERED"],
-            default: "FIXED",
-            description: "METERED = renters pay per minute of session time (remote-access Tech listings only; requires hourly_rate_usd).",
-          },
-          external_id: {
-            type: "string",
-            maxLength: 100,
-            description: "Optional inventory-system id — future calls with the same external_id update this listing instead of duplicating it.",
-          },
-        },
-      },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
     },
-    {
-      name: "rigshare_check_availability",
-      description: [
-        "REQUIRES API KEY (equipment:read scope). Returns the unavailability",
-        "windows (blocked date ranges) RIGShare holds for one of YOUR listings,",
-        "identified by its external_id — the inventory/SKU id you listed it under",
-        "(via rigshare_create_listing's external_id). Use this to reconcile your",
-        "ERP/fleet calendar with RIGShare, or to check whether a date range is",
-        "open before pushing new blocks with rigshare_sync_availability. If you",
-        "pass starts_at + ends_at, the tool also reports whether that specific",
-        "range overlaps a blocked window. NOTE: the endpoint keys ONLY on",
-        "external_id (an owner-scoped lookup) — it does not accept an equipment",
-        "UUID, and the windows returned are availability blocks, not renter",
-        "bookings.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["external_id"],
-        properties: {
-          external_id: {
-            type: "string",
-            maxLength: 120,
-            description:
-              "The inventory/SKU id you listed the equipment under (rigshare_create_listing's external_id). Owner-scoped to your account.",
-          },
-          starts_at: {
-            type: "string",
-            format: "date-time",
-            description:
-              "Optional. If provided with ends_at, the tool reports whether this range is free of blocked windows.",
-          },
-          ends_at: {
-            type: "string",
-            format: "date-time",
-            description: "Optional. See starts_at.",
-          },
-        },
-      },
+  },
+  createBooking,
+);
+
+registerRigTool(
+  "rigshare_create_listing",
+  {
+    title: "Create listing",
+    description: [
+      "REQUIRES API KEY (equipment:write scope). Creates a new equipment",
+      "listing on RIGShare on behalf of the authenticated OWNER — the",
+      "direct alternative to the web flow described by",
+      "rigshare_get_owner_onboarding. Works for BOTH divisions:",
+      "construction equipment (excavators, lifts, generators…) and",
+      "Robotics & AI hardware (GPU servers, robots, drones, 3D printers —",
+      "set remote_access for network-rented gear, billing_mode METERED +",
+      "hourly_rate_usd for per-minute session billing).",
+      "Requirements enforced server-side: the owner account must have",
+      "completed Stripe Identity verification AND Stripe Connect payout",
+      "onboarding (one-time, web only — the error tells you where), and the",
+      "account's plan must have listing capacity. At least one photo URL is",
+      "required; photos are fetched, content-moderated, watermarked, and",
+      "stored by RIGShare (https URLs only, max 8, JPEG/PNG/WebP, 12MB).",
+      "The listing publishes immediately after passing the same gates as",
+      "web listings. Confirm price and details with the owner before",
+      "calling — this publishes to a live marketplace.",
+    ].join(" "),
+    inputSchema: {
+      title: z.string().min(5).max(120),
+      description: z.string().min(10).max(5000),
+      category: z.string(),
+      make: z.string().max(80),
+      model: z.string().max(80),
+      year: z.number().int().min(1950).max(2035),
+      condition: z.enum(["EXCELLENT", "GOOD", "FAIR"]),
+      daily_rate_usd: z.number().min(1).max(100000),
+      hourly_rate_usd: z.number().min(0).max(100000).optional(),
+      weekly_rate_usd: z.number().min(0).max(500000).optional(),
+      monthly_rate_usd: z.number().min(0).max(2000000).optional(),
+      city: z.string(),
+      state: z.string(),
+      zip: z.string(),
+      photos: z
+        .array(
+          z.union([
+            z.string().url(),
+            z.object({
+              url: z.string().url(),
+              angle: z.string().max(32).optional(),
+            }),
+          ]),
+        )
+        .max(8)
+        .optional(),
+      booking_type: z.enum(["INSTANT", "REQUEST"]).optional(),
+      remote_access: z
+        .object({
+          access_type: z.enum(["SSH", "JUPYTER", "DESKTOP", "API"]).optional(),
+          endpoint: z.string().url().optional(),
+          specs: z.string().max(2000).optional(),
+          region: z.string().max(100).optional(),
+          max_concurrent: z.number().int().min(1).max(1000).optional(),
+          require_mfa: z.boolean().optional(),
+          security_ack: z.boolean(),
+        })
+        .optional(),
+      billing_mode: z.enum(["FIXED", "METERED"]).optional(),
+      external_id: z.string().max(100).optional(),
     },
-    {
-      name: "rigshare_sync_availability",
-      description: [
-        "REQUIRES API KEY (equipment:write scope). Pushes your ERP/fleet calendar",
-        "to RIGShare: marks date ranges UNAVAILABLE on one of your listings so no",
-        "new RIGShare booking can be created during them. The listing is",
-        "identified by external_id (the inventory/SKU id from",
-        "rigshare_create_listing). SNAPSHOT semantics: the blocks you send REPLACE",
-        "all previously-synced blocks for that external_id (pass an empty blocks",
-        "array to clear them). Windows that overlap a CONFIRMED RIGShare booking",
-        "are rejected and reported back (you can't retroactively block a day a",
-        "renter already paid for). Owner-created blocks set in the RIGShare UI are",
-        "left untouched. Returns the applied count + any conflicts.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["external_id", "blocks"],
-        properties: {
-          external_id: {
-            type: "string",
-            maxLength: 120,
-            description:
-              "The inventory/SKU id of a listing you own (rigshare_create_listing's external_id).",
-          },
-          blocks: {
-            type: "array",
-            maxItems: 365,
-            description:
-              "Snapshot of unavailability windows. REPLACES all previously-synced blocks for this external_id (pass [] to clear).",
-            items: {
-              type: "object",
-              required: ["starts_at", "ends_at"],
-              properties: {
-                starts_at: {
-                  type: "string",
-                  format: "date-time",
-                  description: "ISO-8601 start of the blocked window.",
-                },
-                ends_at: {
-                  type: "string",
-                  format: "date-time",
-                  description: "ISO-8601 end. Must be after starts_at.",
-                },
-                reason: {
-                  type: "string",
-                  maxLength: 200,
-                  description:
-                    "Optional label (e.g. 'Rented in our ERP', 'Maintenance').",
-                },
-              },
-            },
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  createListing,
+);
+
+registerRigTool(
+  "rigshare_check_availability",
+  {
+    title: "Check availability",
+    description: [
+      "REQUIRES API KEY (equipment:read scope). Returns the unavailability",
+      "windows (blocked date ranges) RIGShare holds for one of YOUR listings,",
+      "identified by its external_id — the inventory/SKU id you listed it under",
+      "(via rigshare_create_listing's external_id). Use this to reconcile your",
+      "ERP/fleet calendar with RIGShare, or to check whether a date range is",
+      "open before pushing new blocks with rigshare_sync_availability. If you",
+      "pass starts_at + ends_at, the tool also reports whether that specific",
+      "range overlaps a blocked window. NOTE: the endpoint keys ONLY on",
+      "external_id (an owner-scoped lookup) — it does not accept an equipment",
+      "UUID, and the windows returned are availability blocks, not renter",
+      "bookings.",
+    ].join(" "),
+    inputSchema: {
+      external_id: z.string().max(120),
+      starts_at: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time").optional(),
+      ends_at: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time").optional(),
     },
-    {
-      name: "rigshare_start_session",
-      description: [
-        "REQUIRES API KEY (sessions:write scope). Starts a remote session on a",
-        "CONFIRMED Robotics & AI booking (SSH / Jupyter / VNC / API access).",
-        "Returns the session access token — shown ONCE, store it securely —",
-        "plus the connection URL and allocated specs. For METERED bookings the",
-        "per-minute clock runs while the session is active; call",
-        "rigshare_end_session (or end the booking) to settle for exact usage.",
-        "Equipment that requires MFA cannot be started via API key — the renter",
-        "must use the web app.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["booking_id"],
-        properties: {
-          booking_id: {
-            type: "string",
-            format: "uuid",
-            description: "A CONFIRMED booking id from rigshare_create_booking or rigshare_list_my_bookings.",
-          },
-        },
-      },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  checkAvailability,
+);
+
+registerRigTool(
+  "rigshare_sync_availability",
+  {
+    title: "Sync availability",
+    description: [
+      "REQUIRES API KEY (equipment:write scope). Pushes your ERP/fleet calendar",
+      "to RIGShare: marks date ranges UNAVAILABLE on one of your listings so no",
+      "new RIGShare booking can be created during them. The listing is",
+      "identified by external_id (the inventory/SKU id from",
+      "rigshare_create_listing). SNAPSHOT semantics: the blocks you send REPLACE",
+      "all previously-synced blocks for that external_id (pass an empty blocks",
+      "array to clear them). Windows that overlap a CONFIRMED RIGShare booking",
+      "are rejected and reported back (you can't retroactively block a day a",
+      "renter already paid for). Owner-created blocks set in the RIGShare UI are",
+      "left untouched. Returns the applied count + any conflicts.",
+    ].join(" "),
+    inputSchema: {
+      external_id: z.string().max(120),
+      blocks: z
+        .array(
+          z.object({
+            starts_at: z.string().datetime({ offset: true, local: true }),
+            ends_at: z.string().datetime({ offset: true, local: true }),
+            reason: z.string().max(200).optional(),
+          }),
+        )
+        .max(365),
     },
-    {
-      name: "rigshare_end_session",
-      description: [
-        "REQUIRES API KEY (sessions:write scope). Ends the METERED (per-minute)",
-        "billing clock on a Robotics & AI booking that rigshare_start_session",
-        "started: the server settles the charge for EXACT usage and releases the",
-        "unused portion of the authorized budget. Call this as soon as the renter",
-        "is done — otherwise the per-minute meter keeps running until a heartbeat",
-        "hard-stop or the budget is exhausted, overcharging the renter. Returns",
-        "the final compute hours + settled cost. Idempotent and safe: a booking",
-        "whose billing is already settled returns an error, never a double charge",
-        "(the server recomputes everything; client amounts are ignored).",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["booking_id"],
-        properties: {
-          booking_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "The METERED booking id whose session clock should be stopped and settled (from rigshare_create_booking or rigshare_list_my_bookings).",
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  },
+  syncAvailability,
+);
+
+registerRigTool(
+  "rigshare_start_session",
+  {
+    title: "Start remote session",
+    description: [
+      "REQUIRES API KEY (sessions:write scope). Starts a remote session on a",
+      "CONFIRMED Robotics & AI booking (SSH / Jupyter / VNC / API access).",
+      "Returns the session access token — shown ONCE, store it securely —",
+      "plus the connection URL and allocated specs. For METERED bookings the",
+      "per-minute clock runs while the session is active; call",
+      "rigshare_end_session (or end the booking) to settle for exact usage.",
+      "Equipment that requires MFA cannot be started via API key — the renter",
+      "must use the web app.",
+    ].join(" "),
+    inputSchema: {
+      booking_id: z.string().uuid(),
     },
-    {
-      name: "rigshare_cancel_booking",
-      description: [
-        "REQUIRES API KEY (bookings:write scope). MONEY PATH — cancels a booking",
-        "for the authenticated user AND issues any refund per RIGShare's published",
-        "cancellation policy. The refund is computed ENTIRELY server-side from the",
-        "booking's canonical charges and how far out the cancellation is (physical:",
-        "7+ days 100% / 3-6 days 75% / 1-2 days 50% / same-day 0%, with a 25%",
-        "high-value exception on >$5k multi-day rentals; Tech remote-access:",
-        "before-session 100% / within first hour 75% / after 0%). The 7% renter",
-        "service fee is non-refundable on renter cancellations. The client CANNOT",
-        "dictate the refund amount or reason code — pass only the booking id. The",
-        "security-deposit authorization hold is released (never captured). Safe on",
-        "terminal state: cancelling an already-cancelled/completed/disputed booking",
-        "returns an error, never a double refund. Returns the refund breakdown",
-        "(refunded, retained, deposit disposition). For a METERED session prefer",
-        "rigshare_end_session (settles exact usage); cancelling a metered booking",
-        "with usage settles like an early end.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["booking_id"],
-        properties: {
-          booking_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "The booking id to cancel (from rigshare_create_booking or rigshare_list_my_bookings).",
-          },
-          reason: {
-            type: "string",
-            maxLength: 500,
-            description:
-              "Optional free-text note for the audit trail. Does NOT affect the refund — the policy and refund are computed server-side from the booking, not from this field.",
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  startSession,
+);
+
+registerRigTool(
+  "rigshare_end_session",
+  {
+    title: "End remote session",
+    description: [
+      "REQUIRES API KEY (sessions:write scope). Ends the METERED (per-minute)",
+      "billing clock on a Robotics & AI booking that rigshare_start_session",
+      "started: the server settles the charge for EXACT usage and releases the",
+      "unused portion of the authorized budget. Call this as soon as the renter",
+      "is done — otherwise the per-minute meter keeps running until a heartbeat",
+      "hard-stop or the budget is exhausted, overcharging the renter. Returns",
+      "the final compute hours + settled cost. Idempotent and safe: a booking",
+      "whose billing is already settled returns an error, never a double charge",
+      "(the server recomputes everything; client amounts are ignored).",
+    ].join(" "),
+    inputSchema: {
+      booking_id: z.string().uuid(),
     },
-    {
-      name: "rigshare_extend_session",
-      description: [
-        "REQUIRES API KEY (sessions:write scope). MONEY PATH — raises the authorized",
-        "per-minute budget on a running METERED (per-minute) Robotics & AI session,",
-        "so a renter whose budget is about to exhaust can keep going. The additional",
-        "authorization hold is placed and the budget raised SERVER-SIDE from the",
-        "equipment's canonical per-minute rate — the client never sets the charge.",
-        "Only the booking's RENTER can extend. Choose one of the fixed extension",
-        "lengths: 15, 30, or 60 minutes. Only actual usage is ever charged; call",
-        "rigshare_end_session when done to settle exact usage and release the unused",
-        "budget. Pairs with rigshare_get_session_usage (check remaining budget",
-        "first). Returns the newly authorized budget.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["booking_id", "additional_minutes"],
-        properties: {
-          booking_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "The METERED booking id whose session budget to raise (from rigshare_create_booking or rigshare_list_my_bookings).",
-          },
-          additional_minutes: {
-            type: "integer",
-            enum: [15, 30, 60],
-            description:
-              "How many more minutes of budget to authorize. Must be 15, 30, or 60.",
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  },
+  endSession,
+);
+
+registerRigTool(
+  "rigshare_cancel_booking",
+  {
+    title: "Cancel booking",
+    description: [
+      "REQUIRES API KEY (bookings:write scope). MONEY PATH — cancels a booking",
+      "for the authenticated user AND issues any refund per RIGShare's published",
+      "cancellation policy. The refund is computed ENTIRELY server-side from the",
+      "booking's canonical charges and how far out the cancellation is (physical:",
+      "7+ days 100% / 3-6 days 75% / 1-2 days 50% / same-day 0%, with a 25%",
+      "high-value exception on >$5k multi-day rentals; Tech remote-access:",
+      "before-session 100% / within first hour 75% / after 0%). The 7% renter",
+      "service fee is non-refundable on renter cancellations. The client CANNOT",
+      "dictate the refund amount or reason code — pass only the booking id. The",
+      "security-deposit authorization hold is released (never captured). Safe on",
+      "terminal state: cancelling an already-cancelled/completed/disputed booking",
+      "returns an error, never a double refund. Returns the refund breakdown",
+      "(refunded, retained, deposit disposition). For a METERED session prefer",
+      "rigshare_end_session (settles exact usage); cancelling a metered booking",
+      "with usage settles like an early end.",
+    ].join(" "),
+    inputSchema: {
+      booking_id: z.string().uuid(),
+      reason: z.string().max(500).optional(),
     },
-    {
-      name: "rigshare_get_session_usage",
-      description: [
-        "REQUIRES API KEY (sessions:read scope). Live budget snapshot for a METERED",
-        "(per-minute) Robotics & AI booking: authorized budget vs. what's been used,",
-        "accrued cost so far, a low-budget warning, and the available extension",
-        "options. Read-only — moves no money. Call this before a session runs out to",
-        "decide whether to rigshare_extend_session. Visible to the booking's renter",
-        "or the equipment owner.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        required: ["booking_id"],
-        properties: {
-          booking_id: {
-            type: "string",
-            format: "uuid",
-            description:
-              "The METERED booking id to inspect (from rigshare_create_booking or rigshare_list_my_bookings).",
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  },
+  cancelBooking,
+);
+
+registerRigTool(
+  "rigshare_extend_session",
+  {
+    title: "Extend session budget",
+    description: [
+      "REQUIRES API KEY (sessions:write scope). MONEY PATH — raises the authorized",
+      "per-minute budget on a running METERED (per-minute) Robotics & AI session,",
+      "so a renter whose budget is about to exhaust can keep going. The additional",
+      "authorization hold is placed and the budget raised SERVER-SIDE from the",
+      "equipment's canonical per-minute rate — the client never sets the charge.",
+      "Only the booking's RENTER can extend. Choose one of the fixed extension",
+      "lengths: 15, 30, or 60 minutes. Only actual usage is ever charged; call",
+      "rigshare_end_session when done to settle exact usage and release the unused",
+      "budget. Pairs with rigshare_get_session_usage (check remaining budget",
+      "first). Returns the newly authorized budget.",
+    ].join(" "),
+    inputSchema: {
+      booking_id: z.string().uuid(),
+      additional_minutes: z.preprocess((v) => (typeof v === "string" ? Number(v) : v), z.union([z.literal(15), z.literal(30), z.literal(60)])),
     },
-    {
-      name: "rigshare_save_draft_listing",
-      description: [
-        "REQUIRES API KEY (equipment:write scope). Saves a HALF-FINISHED equipment",
-        "listing as a DRAFT on behalf of the authenticated OWNER — the same fields",
-        "as rigshare_create_listing, but nothing goes live. Drafts are UNGATED: no",
-        "identity verification and no Stripe Connect payout setup are needed to",
-        "DRAFT (matching RIGShare's draft-first flow). Those gates — plus at least",
-        "one photo — are required only when you PUBLISH (done on the web, or via the",
-        "drafts publish endpoint). No security_ack is required to draft a remote-",
-        "access listing; it's required at publish. Idempotent per draft_session_id",
-        "(repeat calls with the same id update the same draft). Returns the draft id",
-        "+ the draft_session_id to resume it. Use this when the owner isn't verified",
-        "yet or wants to finish the listing later.",
-      ].join(" "),
-      inputSchema: {
-        type: "object",
-        properties: {
-          draft_session_id: {
-            type: "string",
-            minLength: 8,
-            maxLength: 128,
-            description:
-              "Optional idempotency/resume key. Omit to have one generated (returned in the response). Reuse it to update the SAME draft instead of creating another.",
-          },
-          title: { type: "string", minLength: 1, maxLength: 200 },
-          description: { type: "string", maxLength: 5000 },
-          category: {
-            type: "string",
-            description:
-              "Exact category code — use rigshare_list_categories to discover valid values (e.g. AI_COMPUTE, EXCAVATORS).",
-          },
-          make: { type: "string", maxLength: 120 },
-          model: { type: "string", maxLength: 120 },
-          year: { type: "integer", minimum: 1950, maximum: 2035 },
-          condition: { type: "string", enum: ["EXCELLENT", "GOOD", "FAIR"] },
-          daily_rate_usd: { type: "number", minimum: 0, maximum: 100000 },
-          hourly_rate_usd: {
-            type: "number",
-            minimum: 0,
-            maximum: 100000,
-            description: "Per-minute metering basis when billing_mode is METERED.",
-          },
-          weekly_rate_usd: { type: "number", minimum: 0, maximum: 500000 },
-          monthly_rate_usd: { type: "number", minimum: 0, maximum: 2000000 },
-          city: { type: "string", maxLength: 120 },
-          state: { type: "string", description: "Two-letter US state code." },
-          zip: { type: "string", description: "5-digit US zip code." },
-          booking_type: {
-            type: "string",
-            enum: ["INSTANT", "REQUEST"],
-            description: "INSTANT = book without approval; REQUEST = owner approves each booking.",
-          },
-          billing_mode: {
-            type: "string",
-            enum: ["FIXED", "METERED"],
-            description: "METERED = per-minute (remote-access Tech only; needs hourly_rate_usd). Coherence is re-checked at publish.",
-          },
-          remote_access: {
-            type: "object",
-            description:
-              "Robotics & AI categories only — remote-access config. No security_ack needed to DRAFT (required at publish).",
-            properties: {
-              access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
-              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint (SSRF-validated at write)." },
-              specs: { type: "string", maxLength: 2000 },
-              region: { type: "string", maxLength: 120 },
-              max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
-              require_mfa: { type: "boolean" },
-            },
-          },
-        },
-      },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  extendSession,
+);
+
+registerRigTool(
+  "rigshare_get_session_usage",
+  {
+    title: "Get session usage",
+    description: [
+      "REQUIRES API KEY (sessions:read scope). Live budget snapshot for a METERED",
+      "(per-minute) Robotics & AI booking: authorized budget vs. what's been used,",
+      "accrued cost so far, a low-budget warning, and the available extension",
+      "options. Read-only — moves no money. Call this before a session runs out to",
+      "decide whether to rigshare_extend_session. Visible to the booking's renter",
+      "or the equipment owner.",
+    ].join(" "),
+    inputSchema: {
+      booking_id: z.string().uuid(),
     },
-  ],
-}));
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  getSessionUsage,
+);
+
+registerRigTool(
+  "rigshare_save_draft_listing",
+  {
+    title: "Save draft listing",
+    description: [
+      "REQUIRES API KEY (equipment:write scope). Saves a HALF-FINISHED equipment",
+      "listing as a DRAFT on behalf of the authenticated OWNER — the same fields",
+      "as rigshare_create_listing, but nothing goes live. Drafts are UNGATED: no",
+      "identity verification and no Stripe Connect payout setup are needed to",
+      "DRAFT (matching RIGShare's draft-first flow). Those gates — plus at least",
+      "one photo — are required only when you PUBLISH (done on the web, or via the",
+      "drafts publish endpoint). No security_ack is required to draft a remote-",
+      "access listing; it's required at publish. Idempotent per draft_session_id",
+      "(repeat calls with the same id update the same draft). Returns the draft id",
+      "+ the draft_session_id to resume it. Use this when the owner isn't verified",
+      "yet or wants to finish the listing later.",
+    ].join(" "),
+    inputSchema: {
+      draft_session_id: z.string().min(8).max(128).optional(),
+      title: z.string().min(1).max(200).optional(),
+      description: z.string().max(5000).optional(),
+      category: z.string().optional(),
+      make: z.string().max(120).optional(),
+      model: z.string().max(120).optional(),
+      year: z.number().int().min(1950).max(2035).optional(),
+      condition: z.enum(["EXCELLENT", "GOOD", "FAIR"]).optional(),
+      daily_rate_usd: z.number().min(0).max(100000).optional(),
+      hourly_rate_usd: z.number().min(0).max(100000).optional(),
+      weekly_rate_usd: z.number().min(0).max(500000).optional(),
+      monthly_rate_usd: z.number().min(0).max(2000000).optional(),
+      city: z.string().max(120).optional(),
+      state: z.string().optional(),
+      zip: z.string().optional(),
+      booking_type: z.enum(["INSTANT", "REQUEST"]).optional(),
+      billing_mode: z.enum(["FIXED", "METERED"]).optional(),
+      remote_access: z
+        .object({
+          access_type: z.enum(["SSH", "JUPYTER", "DESKTOP", "API"]).optional(),
+          endpoint: z.string().url().optional(),
+          specs: z.string().max(2000).optional(),
+          region: z.string().max(120).optional(),
+          max_concurrent: z.number().int().min(1).max(1000).optional(),
+          require_mfa: z.boolean().optional(),
+        })
+        .optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  saveDraftListing,
+);
 
 // ─── Tool implementations ───────────────────────────────────────────
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    switch (name) {
-      case "rigshare_search_equipment":
-        return await searchEquipment(args || {});
-      case "rigshare_get_equipment":
-        return await getEquipment(args || {});
-      case "rigshare_list_categories":
-        return await listCategories();
-      case "rigshare_get_owner_onboarding":
-        return getOwnerOnboarding(args || {});
-      case "rigshare_list_my_bookings":
-        return await listMyBookings(args || {});
-      case "rigshare_list_my_sessions":
-        return await listMySessions(args || {});
-      case "rigshare_quote_booking":
-        return await quoteBooking(args || {});
-      case "rigshare_create_booking":
-        return await createBooking(args || {});
-      case "rigshare_create_listing":
-        return await createListing(args || {});
-      case "rigshare_check_availability":
-        return await checkAvailability(args || {});
-      case "rigshare_sync_availability":
-        return await syncAvailability(args || {});
-      case "rigshare_start_session":
-        return await startSession(args || {});
-      case "rigshare_end_session":
-        return await endSession(args || {});
-      case "rigshare_cancel_booking":
-        return await cancelBooking(args || {});
-      case "rigshare_extend_session":
-        return await extendSession(args || {});
-      case "rigshare_get_session_usage":
-        return await getSessionUsage(args || {});
-      case "rigshare_save_draft_listing":
-        return await saveDraftListing(args || {});
-      default:
-        return toolError(`Unknown tool: ${name}`);
-    }
-  } catch (err: any) {
-    // Never echo raw internal error text to the model/user — log the full
-    // detail to stderr (stdout is reserved for MCP protocol traffic) and
-    // return a generic, non-leaky message.
-    console.error(
-      `[rigshare-mcp] tool "${name}" threw:`,
-      err?.stack || err?.message || err,
-    );
-    return toolError(
-      "The RIGShare MCP server hit an unexpected error. Check the server logs (stderr) for details.",
-    );
-  }
-});
 
 /** Run a filtered browse query against the public API. */
 async function searchEquipment(args: Record<string, unknown>) {
@@ -1003,10 +744,8 @@ async function searchEquipment(args: Record<string, unknown>) {
 
 /** Fetch a single listing by UUID. */
 async function getEquipment(args: Record<string, unknown>) {
-  const id = args.id;
-  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) {
-    return toolError("id must be a valid UUID");
-  }
+  // Zod validated args.id as a UUID before this handler ran.
+  const id = args.id as string;
   const url = `${RIGSHARE_API}/equipment/${encodeURIComponent(id)}`;
   const res = await fetchJson(url);
   if (res.status === 404) return toolError(`No active listing found for id ${id}.`);
@@ -1337,21 +1076,8 @@ async function listMySessions(args: Record<string, unknown>) {
 async function quoteBooking(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  // Same minimal client-side validation as createBooking.
-  if (!args.equipment_id || typeof args.equipment_id !== "string") {
-    return toolError("equipment_id is required (uuid)");
-  }
-  if (!args.start_date || typeof args.start_date !== "string") {
-    return toolError("start_date is required (ISO-8601)");
-  }
-  if (!args.end_date || typeof args.end_date !== "string") {
-    return toolError("end_date is required (ISO-8601)");
-  }
-  if (!args.duration_type) {
-    return toolError(
-      "duration_type is required (HOURLY | FOUR_HOURS | DAILY | WEEKLY | MONTHLY)",
-    );
-  }
+  // Required fields (equipment_id UUID, start/end ISO datetimes, duration_type
+  // enum) are validated by the Zod input schema before this handler runs.
 
   const body: Record<string, unknown> = {
     equipment_id: args.equipment_id,
@@ -1430,21 +1156,8 @@ async function quoteBooking(args: Record<string, unknown>) {
 async function createBooking(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  // Minimum-viable validation client-side before hitting the server
-  if (!args.equipment_id || typeof args.equipment_id !== "string") {
-    return toolError("equipment_id is required (uuid)");
-  }
-  if (!args.start_date || typeof args.start_date !== "string") {
-    return toolError("start_date is required (ISO-8601)");
-  }
-  if (!args.end_date || typeof args.end_date !== "string") {
-    return toolError("end_date is required (ISO-8601)");
-  }
-  if (!args.duration_type) {
-    return toolError(
-      "duration_type is required (HOURLY | FOUR_HOURS | DAILY | WEEKLY | MONTHLY)",
-    );
-  }
+  // Required fields (equipment_id UUID, start/end ISO datetimes, duration_type
+  // enum) are validated by the Zod input schema before this handler runs.
 
   const body: Record<string, unknown> = {
     equipment_id: args.equipment_id,
@@ -1519,13 +1232,10 @@ async function createBooking(args: Record<string, unknown>) {
 async function createListing(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  for (const field of ["title", "description", "category", "make", "model", "condition", "city", "state", "zip"]) {
-    if (!args[field] || typeof args[field] !== "string") {
-      return toolError(`${field} is required (string)`);
-    }
-  }
-  if (typeof args.year !== "number") return toolError("year is required (integer)");
-  if (typeof args.daily_rate_usd !== "number") return toolError("daily_rate_usd is required (number)");
+  // Required scalar fields (title/description/category/make/model/year/condition/
+  // daily_rate_usd/city/state/zip) are validated by the Zod input schema before
+  // this handler runs. The "at least one photo" rule below is a business rule the
+  // schema can't express (photos is optional, but must be non-empty to create).
   const photos = Array.isArray(args.photos) ? args.photos : [];
   if (photos.length === 0) {
     return toolError("At least one photo is required — pass photos: [{url: 'https://…'}]. RIGShare moderates, watermarks, and re-hosts them.");
@@ -1703,12 +1413,7 @@ async function syncAvailability(args: Record<string, unknown>) {
       "external_id is required — the inventory/SKU id of the listing whose calendar you're syncing (rigshare_create_listing's external_id).",
     );
   }
-  if (!Array.isArray(args.blocks)) {
-    return toolError(
-      "blocks is required — an array of { starts_at, ends_at, reason? } unavailability windows (pass [] to clear all synced blocks).",
-    );
-  }
-
+  // blocks is validated as an array by the Zod input schema before this handler.
   const blocks = (args.blocks as any[]).map((b) => ({
     starts_at: b?.starts_at,
     ends_at: b?.ends_at,
@@ -1761,10 +1466,7 @@ async function syncAvailability(args: Record<string, unknown>) {
 async function startSession(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
-    return toolError("booking_id must be a valid UUID");
-  }
-
+  // booking_id is validated as a UUID by the Zod input schema before this handler.
   const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_AGENT_API}/sessions`, {
     method: "POST",
     body: JSON.stringify({ booking_id: args.booking_id }),
@@ -1807,13 +1509,10 @@ async function startSession(args: Record<string, unknown>) {
 async function endSession(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
-    return toolError("booking_id must be a valid UUID");
-  }
-
+  // booking_id is validated as a UUID by the Zod input schema before this handler.
   const res = await fetchAuthJson(
     RIGSHARE_API_KEY,
-    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/end`,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id as string)}/end`,
     { method: "POST", body: JSON.stringify({}) },
   );
   if (res.error) return toolError(res.error);
@@ -1853,15 +1552,13 @@ async function endSession(args: Record<string, unknown>) {
 async function cancelBooking(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
-    return toolError("booking_id must be a valid UUID");
-  }
+  // booking_id is validated as a UUID by the Zod input schema before this handler.
   const body: Record<string, unknown> = {};
   if (typeof args.reason === "string" && args.reason.trim()) body.reason = args.reason.trim();
 
   const res = await fetchAuthJson(
     RIGSHARE_API_KEY,
-    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/cancel`,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id as string)}/cancel`,
     { method: "POST", body: JSON.stringify(body) },
   );
   if (res.error) return toolError(res.error);
@@ -1906,16 +1603,11 @@ async function cancelBooking(args: Record<string, unknown>) {
 async function extendSession(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
-    return toolError("booking_id must be a valid UUID");
-  }
-  if (![15, 30, 60].includes(Number(args.additional_minutes))) {
-    return toolError("additional_minutes is required and must be 15, 30, or 60");
-  }
-
+  // booking_id (UUID) and additional_minutes (15 | 30 | 60) are validated by the
+  // Zod input schema before this handler runs.
   const res = await fetchAuthJson(
     RIGSHARE_API_KEY,
-    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/extend`,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id as string)}/extend`,
     { method: "POST", body: JSON.stringify({ additional_minutes: Number(args.additional_minutes) }) },
   );
   if (res.error) return toolError(res.error);
@@ -1945,13 +1637,10 @@ async function extendSession(args: Record<string, unknown>) {
 async function getSessionUsage(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
-  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
-    return toolError("booking_id must be a valid UUID");
-  }
-
+  // booking_id is validated as a UUID by the Zod input schema before this handler.
   const res = await fetchAuthJson(
     RIGSHARE_API_KEY,
-    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/meter`,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id as string)}/meter`,
   );
   if (res.error) return toolError(res.error);
 
@@ -2107,6 +1796,10 @@ function toolError(message: string) {
 
 // ─── Boot ────────────────────────────────────────────────────────────
 
+// Exported so tests can introspect the registered tools + invoke handlers via an
+// in-memory transport without booting stdio (see test/tools.test.mjs).
+export { server };
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -2114,7 +1807,24 @@ async function main() {
   process.stderr.write("rigshare-mcp server running on stdio\n");
 }
 
-main().catch((err) => {
-  process.stderr.write(`Fatal: ${err?.message || err}\n`);
-  process.exit(1);
-});
+// Only boot the stdio transport when this file is executed directly as the CLI
+// (the published `rigshare-mcp` bin). realpathSync on both sides makes this
+// symlink-safe (npm/npx invoke via a .bin symlink), so production boot is
+// unchanged; a plain `import` (e.g. from a test) skips it.
+function isEntrypoint(): boolean {
+  try {
+    return (
+      !!process.argv[1] &&
+      realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  main().catch((err) => {
+    process.stderr.write(`Fatal: ${err?.message || err}\n`);
+    process.exit(1);
+  });
+}

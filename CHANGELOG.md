@@ -5,6 +5,34 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-09
+
+### Changed (BREAKING — internal surface only; no tool behavior change)
+- **Migrated from the low-level `Server` API to the modern `McpServer` surface**
+  of the official `@modelcontextprotocol/sdk` (bumped `^1.0.4` → `^1.29.0`; added
+  `zod ^3.25`). Every tool is now registered via `server.registerTool(name, {
+  title, description, inputSchema, annotations }, handler)` instead of the two
+  hand-written `ListToolsRequestSchema` / `CallToolRequestSchema` handlers.
+- **Hand-written JSON Schemas replaced by Zod input schemas.** Each tool's
+  `inputSchema` is now a Zod raw shape that accepts the EXACT SAME inputs (same
+  required vs. optional, enums, formats, and min/max constraints) — e.g.
+  `z.string().uuid()`, `z.string().datetime()`, `z.number().int().min().max()`,
+  `z.enum([...])`. Input is auto-validated BEFORE the handler runs, so the
+  now-redundant manual guards (UUID re-regexes, required-field/type checks, the
+  `additional_minutes` enum check, the `blocks` array check) were removed. The
+  genuinely semantic guards the schema can't express are kept: the `remote_access`
+  `security_ack === true` attestation, the "at least one photo" rule on
+  `create_listing`, and the `external_id` trim/non-empty checks.
+- **Tool annotations added** to every tool (`readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`) plus a concise `title`, so MCP clients can
+  reason about which tools read vs. write vs. destroy.
+- **This is a breaking release only in the SDK/registration surface.** All 17
+  tools keep the SAME names, inputs, endpoints, auth, and rendered output text.
+  Invalid-input error messages now come from Zod (the deleted manual guards)
+  instead of the old custom strings — the only observable difference, and only on
+  malformed input. Bumped to `2.0.0` to signal the SDK dependency jump; there is
+  NO change to any tool's behavior on valid input.
+
 ## [1.6.0] - 2026-07-09
 
 ### Added
