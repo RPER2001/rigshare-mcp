@@ -13,10 +13,18 @@
  *   - rigshare_get_equipment     — full details for one listing
  *   - rigshare_list_categories   — available categories with listing counts
  *
- * All tools are READ-ONLY and unauthenticated — they hit RIGShare's
- * public API at /api/public/v1/*. No API key required, no user account
- * needed. For write operations (create booking, list equipment),
- * the user should be directed to https://www.rigshare.app.
+ * The three tools above are READ-ONLY and unauthenticated — they hit
+ * RIGShare's public API at /api/public/v1/*. Additional authenticated
+ * tools (booking, listing, sessions) unlock with a RIGSHARE_API_KEY.
+ *
+ * RESOURCES (canonical, single-source-of-truth copy):
+ *   - rigshare://pricing, rigshare://owner-onboarding — backed by the
+ *     app's /api/public/v1/policy endpoint (so pricing/fee/onboarding copy
+ *     never drifts from the code that charges money)
+ *   - rigshare://categories — backed by /api/public/v1/categories
+ *   - rigshare://terms, rigshare://how-it-works — static URL pointers
+ *
+ * PROMPTS (guided workflows): rent-gpu, list-my-equipment, check-my-rentals.
  *
  * TRANSPORT
  *   Uses stdio, the standard MCP transport for local tools invoked by
@@ -70,6 +78,8 @@ const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
 const VERSION = "2.0.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
+// Bounded per-request timeout — a stalled endpoint must never block a tool.
+const FETCH_TIMEOUT_MS = 10_000;
 
 const server = new McpServer(
   {
@@ -79,14 +89,64 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
+      // Resources expose the canonical pricing / onboarding / category / terms
+      // copy (see registerResource calls near the bottom). Prompts expose 3
+      // guided workflows (rent-gpu / list-my-equipment / check-my-rentals).
+      resources: {},
+      prompts: {},
     },
   },
 );
 
+// ─── In-memory TTL cache for the public GET surface (P-9) ────────────
+// Categories + the /policy copy endpoint change slowly; cache them ~10 min so
+// the resources + owner-onboarding tool don't hammer the API on every call.
+const PUBLIC_CACHE_TTL_MS = 10 * 60 * 1000;
+type FetchResult = {
+  data?: any;
+  status?: number;
+  error?: string;
+  code?: string;
+  retryable?: boolean;
+};
+const publicJsonCache = new Map<string, { expires: number; value: FetchResult }>();
+
+// Bundled fallback for the canonical pricing/fee copy. Mirrors the enforced
+// constants (app/_lib/subscriptions.ts + app/_lib/stripe.ts) EXACTLY, so the
+// owner-onboarding tool renders identical copy whether it sourced the live
+// /policy endpoint or fell back here. This is ONLY a fallback — the live path
+// is authoritative and is what keeps copy from drifting after a price change.
+const BUNDLED_POLICY = {
+  version: "bundled",
+  commission: { free: 0.15, pro: 0.1, enterprise: 0.07, student: 0.07 },
+  renter_service_fee: { standard: 0.07, student: 0.03 },
+  subscription_prices: {
+    pro: { monthly_cents: 4999, yearly_cents: 49900 },
+    enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
+  },
+  listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
+  security_deposit: { rate: 0.15, min_cents: 10000, min_usd: 100, metered: false },
+} as const;
+type NormalizedPolicy = {
+  version: string;
+  commission: { free: number; pro: number; enterprise: number; student: number };
+  renter_service_fee: { standard: number; student: number };
+  subscription_prices: {
+    pro: { monthly_cents: number; yearly_cents: number };
+    enterprise: { monthly_cents: number; yearly_cents: number };
+  };
+  listing_caps: { free: number; pro: number; enterprise: number; student: number };
+  security_deposit: { rate: number; min_cents: number; min_usd: number; metered: boolean };
+};
+
 // Shape of every tool's return payload (a single text block, optionally an
-// error) — structurally the MCP CallToolResult content shape.
+// error) — structurally the MCP CallToolResult content shape. `structuredContent`
+// is additive (P-4): read tools that declare an `outputSchema` also return the
+// normalized object here alongside the unchanged text. The SDK skips output
+// validation for `isError` results, so error paths may omit it.
 type ToolResult = {
   content: { type: "text"; text: string }[];
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -103,6 +163,7 @@ function registerRigTool(
     title: string;
     description: string;
     inputSchema: z.ZodRawShape;
+    outputSchema?: z.ZodRawShape;
     annotations: ToolAnnotations;
   },
   handler: (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>,
@@ -113,6 +174,10 @@ function registerRigTool(
       title: config.title,
       description: config.description,
       inputSchema: config.inputSchema,
+      // Additive (P-4): only present on the read tools that return conforming
+      // structuredContent. Declaring an outputSchema makes the SDK REQUIRE
+      // structuredContent on every non-error return path.
+      ...(config.outputSchema ? { outputSchema: config.outputSchema } : {}),
       annotations: config.annotations,
     },
     (async (args: Record<string, unknown>) => {
@@ -130,6 +195,110 @@ function registerRigTool(
     }) as any,
   );
 }
+
+// ─── structuredContent output schemas (P-4) ─────────────────────────
+// Permissive by design: every field is optional/nullish so the parsed upstream
+// JSON (returned verbatim as structuredContent) always conforms. The SDK
+// validates structuredContent with z.object(shape), which IGNORES unknown keys
+// — so extra upstream fields pass through to the client untouched; declaring the
+// salient fields just gives agents a documented shape to parse. Only READ tools
+// get these (write tools are left text-only to avoid a declared/returned
+// mismatch, which the SDK throws on).
+const looseRecord = () => z.record(z.any());
+
+const equipmentItemShape = {
+  id: z.string().optional(),
+  title: z.string().optional(),
+  division: z.string().optional(),
+  category: z.string().optional(),
+  url: z.string().optional(),
+  make: z.string().nullish(),
+  model: z.string().nullish(),
+  year: z.number().nullish(),
+  condition: z.string().nullish(),
+  description: z.string().nullish(),
+  compute_architecture: z.string().nullish(),
+  rates_usd: looseRecord().nullish(),
+  remote_access: looseRecord().nullish(),
+  billing: looseRecord().nullish(),
+  rating: looseRecord().nullish(),
+  location: looseRecord().nullish(),
+  owner: looseRecord().nullish(),
+} as const;
+
+const searchOutputSchema = {
+  listings: z.array(z.object(equipmentItemShape).passthrough()),
+  pagination: z
+    .object({
+      total: z.number().optional(),
+      page: z.number().optional(),
+      total_pages: z.number().optional(),
+      limit: z.number().optional(),
+    })
+    .passthrough()
+    .optional(),
+  total: z.number().optional(),
+} as const;
+
+const quoteOutputSchema = {
+  billing_mode: z.string().optional(),
+  // FIXED-listing breakdown (cents + a `formatted` USD mirror).
+  rental_days: z.number().nullish(),
+  rental_subtotal_cents: z.number().nullish(),
+  delivery_fee_cents: z.number().nullish(),
+  service_fee_cents: z.number().nullish(),
+  basic_insurance_cents: z.number().nullish(),
+  estimated_egress_cents: z.number().nullish(),
+  charged_subtotal_cents: z.number().nullish(),
+  security_deposit_cents: z.number().nullish(),
+  total_amount_cents: z.number().nullish(),
+  formatted: looseRecord().nullish(),
+  tax: looseRecord().nullish(),
+  disclaimer: z.string().nullish(),
+  // METERED-listing budget shape.
+  rate_hourly_cents: z.number().nullish(),
+  rate_hourly_usd: z.string().nullish(),
+  min_budget_cents: z.number().nullish(),
+  min_budget_usd: z.string().nullish(),
+  presets: z.array(looseRecord()).nullish(),
+} as const;
+
+const bookingsOutputSchema = {
+  bookings: z.array(looseRecord()),
+} as const;
+
+const sessionsOutputSchema = {
+  sessions: z.array(looseRecord()),
+} as const;
+
+const usageOutputSchema = {
+  booking_id: z.string().optional(),
+  finalized: z.boolean().nullish(),
+  billedCents: z.number().nullish(),
+  budgetCents: z.number().nullish(),
+  usageCents: z.number().nullish(),
+  serviceFeeCents: z.number().nullish(),
+  totalCents: z.number().nullish(),
+  rateHourlyCents: z.number().nullish(),
+  usedMinutes: z.number().nullish(),
+  remainingMinutes: z.number().nullish(),
+  hasActiveSession: z.boolean().nullish(),
+  lowBudget: z.boolean().nullish(),
+  extensionOptions: z.array(looseRecord()).nullish(),
+} as const;
+
+const availabilityOutputSchema = {
+  external_id: z.string().optional(),
+  equipment_id: z.string().nullish(),
+  blocks: z.array(looseRecord()).optional(),
+  requested_range: z
+    .object({
+      starts_at: z.string().optional(),
+      ends_at: z.string().optional(),
+      available: z.boolean().optional(),
+    })
+    .nullish(),
+} as const;
 
 // ─── Tool definitions (registered on the modern McpServer surface) ──────
 
@@ -165,6 +334,7 @@ registerRigTool(
       page: z.number().int().min(1).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     },
+    outputSchema: searchOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   searchEquipment,
@@ -179,6 +349,7 @@ registerRigTool(
     inputSchema: {
       id: z.string().uuid(),
     },
+    outputSchema: equipmentItemShape,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   getEquipment,
@@ -243,6 +414,7 @@ registerRigTool(
       limit: z.number().int().min(1).max(100).optional(),
       page: z.number().int().min(1).optional(),
     },
+    outputSchema: bookingsOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   listMyBookings,
@@ -260,6 +432,7 @@ registerRigTool(
         .enum(["provisioning", "active", "paused", "terminated", "failed"])
         .optional(),
     },
+    outputSchema: sessionsOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   listMySessions,
@@ -299,6 +472,7 @@ registerRigTool(
       qualification_answers: z.record(z.string().max(500)).optional(),
       qualification_version: z.string().max(50).optional(),
     },
+    outputSchema: quoteOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   quoteBooking,
@@ -443,6 +617,7 @@ registerRigTool(
       starts_at: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time").optional(),
       ends_at: z.string().refine((d) => !isNaN(Date.parse(d)), "must be a valid date or date-time").optional(),
     },
+    outputSchema: availabilityOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   checkAvailability,
@@ -596,6 +771,7 @@ registerRigTool(
     inputSchema: {
       booking_id: z.string().uuid(),
     },
+    outputSchema: usageOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   getSessionUsage,
@@ -652,6 +828,277 @@ registerRigTool(
   saveDraftListing,
 );
 
+// ─── MCP RESOURCES (canonical copy — single source of truth) ─────────
+// Backed by the app's public endpoints so the copy can never drift from the
+// code that enforces it. `rigshare://pricing` + `rigshare://owner-onboarding`
+// pull /api/public/v1/policy; `rigshare://categories` pulls the categories
+// endpoint; `rigshare://terms` + `rigshare://how-it-works` are static URL
+// pointers to the web pages.
+
+server.registerResource(
+  "rigshare-pricing",
+  "rigshare://pricing",
+  {
+    title: "RIGShare pricing & fees (canonical)",
+    description:
+      "Live commission tiers, renter service fee (incl. student 3%), subscription prices, listing caps, security-deposit rules, and cancellation schedules — sourced from RIGShare's enforced constants via /api/public/v1/policy. Falls back to bundled copy if unreachable.",
+    mimeType: "application/json",
+  },
+  async (uri) => {
+    const raw = await fetchPolicyRaw();
+    const payload = raw ?? {
+      ...BUNDLED_POLICY,
+      source: "bundled-fallback",
+      note: "Live /policy endpoint unreachable — bundled pricing/fee copy only (cancellation & onboarding steps omitted).",
+    };
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.registerResource(
+  "rigshare-owner-onboarding",
+  "rigshare://owner-onboarding",
+  {
+    title: "RIGShare owner onboarding (canonical)",
+    description:
+      "Draft-first owner onboarding steps + the canonical economics (commission, fees, deposit) an owner sees — sourced from /api/public/v1/policy. Pair with the rigshare_get_owner_onboarding tool for the full division-specific pitch + signup URLs.",
+    mimeType: "application/json",
+  },
+  async (uri) => {
+    const raw = await fetchPolicyRaw();
+    const policy = coercePolicy(raw);
+    const payload = {
+      source: raw ? "live" : "bundled-fallback",
+      economics: {
+        commission: policy.commission,
+        renter_service_fee: policy.renter_service_fee,
+        subscription_prices: policy.subscription_prices,
+        listing_caps: policy.listing_caps,
+        security_deposit: policy.security_deposit,
+      },
+      owner_onboarding_steps:
+        raw?.owner_onboarding_steps ??
+        "Draft-first: sign up → start your listing (no verification needed to draft) → at Publish, complete one-time identity + Stripe Connect setup → go live. See the rigshare_get_owner_onboarding tool for the full guide.",
+      signup: {
+        construction: "https://www.rigshare.app/signup",
+        robotics_ai: "https://www.rigshare.app/robotics-ai/register",
+      },
+    };
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.registerResource(
+  "rigshare-categories",
+  "rigshare://categories",
+  {
+    title: "RIGShare equipment categories",
+    description:
+      "All equipment categories with at least one active listing, grouped by division, with per-category listing counts — sourced from /api/public/v1/categories (cached ~10 min).",
+    mimeType: "application/json",
+  },
+  async (uri) => {
+    const res = await fetchJsonCached(
+      `${RIGSHARE_API}/categories`,
+      PUBLIC_CACHE_TTL_MS,
+    );
+    const payload = res.error
+      ? { error: res.error, categories: [] }
+      : { categories: (res.data?.data || []) as any[] };
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.registerResource(
+  "rigshare-terms",
+  "rigshare://terms",
+  {
+    title: "RIGShare Terms & policies",
+    description:
+      "Links to the authoritative Terms of Service, Privacy Policy, and Refund & Cancellation policies for both divisions.",
+    mimeType: "text/markdown",
+  },
+  async (uri) => ({
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "text/markdown",
+        text: [
+          "# RIGShare Terms & Policies",
+          "",
+          "- Terms of Service: https://www.rigshare.app/terms",
+          "- Privacy Policy: https://www.rigshare.app/privacy",
+          "- Refund & Cancellation (Construction): https://www.rigshare.app/refund-policy",
+          "- Terms of Service (Robotics & AI): https://www.rigshare.app/robotics-ai/terms",
+          "- Refund & Cancellation (Robotics & AI): https://www.rigshare.app/robotics-ai/refund-policy",
+        ].join("\n"),
+      },
+    ],
+  }),
+);
+
+server.registerResource(
+  "rigshare-how-it-works",
+  "rigshare://how-it-works",
+  {
+    title: "How RIGShare works",
+    description:
+      "Links to the 'How it works' pages for renting and listing on each division.",
+    mimeType: "text/markdown",
+  },
+  async (uri) => ({
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "text/markdown",
+        text: [
+          "# How RIGShare works",
+          "",
+          "- Construction (renting & listing): https://www.rigshare.app/how-it-works",
+          "- Robotics & AI (remote-access sessions): https://www.rigshare.app/robotics-ai/how-it-works",
+        ].join("\n"),
+      },
+    ],
+  }),
+);
+
+// ─── MCP PROMPTS (guided workflows) ─────────────────────────────────
+// Concise templates that reference the REAL tool names so a client can drop the
+// user straight into a search→quote→book / onboarding / status flow.
+
+server.registerPrompt(
+  "rent-gpu",
+  {
+    title: "Rent a GPU / compute instance",
+    description:
+      "Guided flow to find, price (dry-run), and book Robotics & AI compute (GPU / robot / drone) for a workload.",
+    argsSchema: {
+      workload: z.string().optional(),
+      budget: z.string().optional(),
+      region: z.string().optional(),
+    },
+  },
+  (args: Record<string, unknown>) => {
+    const workload =
+      typeof args.workload === "string" && args.workload.trim()
+        ? args.workload.trim()
+        : "(describe the workload — e.g. LLM fine-tuning, inference, rendering)";
+    const budget =
+      typeof args.budget === "string" && args.budget.trim() ? args.budget.trim() : "(optional)";
+    const region =
+      typeof args.region === "string" && args.region.trim() ? args.region.trim() : "(optional)";
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              "I want to rent GPU / compute on RIGShare's Robotics & AI division.",
+              `- Workload: ${workload}`,
+              `- Budget: ${budget}`,
+              `- Region: ${region}`,
+              "",
+              "Please:",
+              "1. Call rigshare_search_equipment (division: \"robotics-ai\", plus compute_architecture / max_price_daily_usd / city / remote_only filters as relevant) to find matching instances.",
+              "2. Call rigshare_get_equipment on the best candidate for full specs, remote-access type, and whether it is METERED (per-minute) billing.",
+              "3. Call rigshare_quote_booking to show me the EXACT cost (dry run — nothing is charged) and confirm it with me before booking.",
+              "4. Only after I confirm, call rigshare_create_booking. For METERED listings pass budget_usd (my authorized session spend). Then rigshare_start_session to begin, and rigshare_get_session_usage / rigshare_extend_session / rigshare_end_session to track, extend, and settle.",
+            ].join("\n"),
+          },
+        },
+      ],
+    };
+  },
+);
+
+server.registerPrompt(
+  "list-my-equipment",
+  {
+    title: "List my equipment on RIGShare",
+    description:
+      "Guided owner-onboarding flow: pitch → save a draft → publish a listing (construction or Robotics & AI).",
+    argsSchema: {
+      equipment_type: z.string().optional(),
+    },
+  },
+  (args: Record<string, unknown>) => {
+    const et =
+      typeof args.equipment_type === "string" && args.equipment_type.trim()
+        ? args.equipment_type.trim()
+        : "equipment";
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `I own ${et} and want to list it on RIGShare to earn rental income.`,
+              "",
+              "Please:",
+              `1. Call rigshare_get_owner_onboarding (equipment_type: "${et}") for the current pitch, commission tiers, and the right signup URL.`,
+              "2. If I have a RIGShare API key, call rigshare_save_draft_listing to capture the listing as a draft (no verification needed to draft) — collect title, rates, photos, and (for tech gear) remote-access config from me first.",
+              "3. When I'm ready to go live, call rigshare_create_listing to publish. Identity verification + Stripe Connect payout setup are required once at publish (the tool's error tells me where if they aren't done).",
+            ].join("\n"),
+          },
+        },
+      ],
+    };
+  },
+);
+
+server.registerPrompt(
+  "check-my-rentals",
+  {
+    title: "Check my RIGShare rentals & sessions",
+    description:
+      "Guided status overview: bookings + remote sessions + live metered usage for the authenticated user.",
+  },
+  () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: [
+            "Give me a status overview of my RIGShare activity.",
+            "",
+            "Please:",
+            "1. Call rigshare_list_my_bookings to list my bookings (equipment, dates, status, totals).",
+            "2. Call rigshare_list_my_sessions to list my active and past remote sessions.",
+            "3. For any METERED booking with a live session, call rigshare_get_session_usage to show remaining budget, and suggest rigshare_extend_session if it's running low.",
+          ].join("\n"),
+        },
+      },
+    ],
+  }),
+);
+
 // ─── Tool implementations ───────────────────────────────────────────
 
 /** Run a filtered browse query against the public API. */
@@ -699,8 +1146,9 @@ async function searchEquipment(args: Record<string, unknown>) {
         : args.division === "construction"
           ? " If you OWN this kind of equipment and might want to rent it out, call rigshare_get_owner_onboarding."
           : " If the user OWNS equipment like this, rigshare_get_owner_onboarding returns the listing pitch — RIGShare is actively growing supply in under-represented categories.";
-    return toolText(
+    return toolData(
       `No active RIGShare listings matched those filters. Try broadening (remove location, widen price range, or switch division to "all"). Total in the matching category: 0.${divisionNote}`,
+      { listings: [], pagination, total: (pagination as any).total ?? 0 },
     );
   }
 
@@ -739,7 +1187,11 @@ async function searchEquipment(args: Record<string, unknown>) {
     ].join("\n");
   });
   const header = `Found ${pagination.total ?? listings.length} matching listings (page ${pagination.page ?? 1} of ${pagination.total_pages ?? 1}). Showing ${listings.length} on this page:`;
-  return toolText(`${header}\n\n${lines.join("\n\n")}`);
+  return toolData(`${header}\n\n${lines.join("\n\n")}`, {
+    listings,
+    pagination,
+    total: pagination.total ?? listings.length,
+  });
 }
 
 /** Fetch a single listing by UUID. */
@@ -785,13 +1237,14 @@ async function getEquipment(args: Record<string, unknown>) {
     .filter(Boolean)
     .join("\n");
 
-  return toolText(description);
+  // structuredContent = the parsed upstream listing (passthrough); the SDK
+  // ignores the extra keys not declared in equipmentItemShape.
+  return toolData(description, l as Record<string, unknown>);
 }
 
-/** List categories + counts. */
+/** List categories + counts. Cached ~10 min in-memory (P-9). */
 async function listCategories() {
-  const url = `${RIGSHARE_API}/categories`;
-  const res = await fetchJson(url);
+  const res = await fetchJsonCached(`${RIGSHARE_API}/categories`, PUBLIC_CACHE_TTL_MS);
   if (res.error) return toolError(res.error);
 
   const cats = (res.data?.data || []) as any[];
@@ -816,7 +1269,9 @@ async function listCategories() {
 }
 
 /**
- * Owner recruitment pitch. Pure-string tool — no API call, no auth.
+ * Owner recruitment pitch. No auth. Fetches current pricing/onboarding copy
+ * from /policy (short TTL cache, bounded timeout) and gracefully falls back to
+ * bundled copy if unreachable — so it never blocks or breaks.
  * Called by AI agents when a user mentions they OWN equipment, or
  * when a search comes back empty (suggesting the supply side of the
  * marketplace needs growth in that category).
@@ -833,10 +1288,17 @@ async function listCategories() {
  * a direct signup link inside Claude Desktop / Cursor. Supply-side
  * acquisition via MCP — a play very few marketplaces have running.
  */
-function getOwnerOnboarding(args: Record<string, unknown>) {
+async function getOwnerOnboarding(args: Record<string, unknown>) {
   const equipmentType =
     typeof args.equipment_type === "string" ? args.equipment_type.trim() : "";
   const hint = typeof args.division_hint === "string" ? args.division_hint : "";
+
+  // Source the pricing/fee/commission copy LIVE from the app's /policy endpoint
+  // (the single source of truth), so a price change never leaves this
+  // independently-published package stale. getPolicy() ALWAYS returns a usable
+  // object — on any fetch failure it falls back to BUNDLED_POLICY (which mirrors
+  // the enforced constants), so this tool can never break on unreachable policy.
+  const policy = await getPolicy();
 
   // Classify division from the equipment string if the agent didn't pass a hint
   const et = equipmentType.toLowerCase();
@@ -858,19 +1320,8 @@ function getOwnerOnboarding(args: Record<string, unknown>) {
     "",
     "RIGShare is a peer-to-peer rental marketplace. Owners list idle equipment; renters book by the hour, day, or week. You keep the bulk of every rental — RIGShare handles payments (Stripe), insurance proof, identity verification, and security deposits. You control pricing, availability, and who can rent.",
     "",
-    "## Economics",
-    "",
-    "| Tier | Monthly fee | Platform commission | Listings cap |",
-    "|---|---|---|---|",
-    "| Free | $0 | 15% | 5 listings |",
-    "| Pro | $49.99 | 10% | 15 listings |",
-    "| Enterprise | $149.99 | 7% | Unlimited |",
-    "",
-    "- Renters pay up to a 7% service fee on top of your rental total (reduced to 3% for verified students) — doesn't reduce your payout",
-    "- 15% security-deposit authorization hold (minimum $100) on physical/FIXED rentals, released within 48h of clean return — protects you against damage. METERED per-minute Tech sessions have NO deposit — the renter authorizes a usage budget instead",
-    "- Payouts via Stripe Connect, 48-hour hold after rental completion",
-    "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",
-    "",
+    // Rendered from the canonical /policy copy (falls back to bundled values).
+    ...renderEconomics(policy),
   );
 
   if (looksRoboticsAi) {
@@ -973,6 +1424,7 @@ async function fetchAuthJson(
         "User-Agent": USER_AGENT,
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -1014,8 +1466,9 @@ async function listMyBookings(args: Record<string, unknown>) {
   if (res.error) return toolError(res.error);
   const bookings = ((res.data as any)?.bookings || []) as any[];
   if (bookings.length === 0) {
-    return toolText(
+    return toolData(
       `No bookings found${args.status ? ` with status ${args.status}` : ""}.`,
+      { bookings: [] },
     );
   }
   const lines = bookings.map((b, i) => {
@@ -1033,7 +1486,7 @@ async function listMyBookings(args: Record<string, unknown>) {
       `   Booking ID: ${b.id}`,
     ].join("\n");
   });
-  return toolText(`Your bookings:\n\n${lines.join("\n\n")}`);
+  return toolData(`Your bookings:\n\n${lines.join("\n\n")}`, { bookings });
 }
 
 async function listMySessions(args: Record<string, unknown>) {
@@ -1050,7 +1503,7 @@ async function listMySessions(args: Record<string, unknown>) {
   if (res.error) return toolError(res.error);
   const sessions = ((res.data as any)?.sessions || []) as any[];
   if (sessions.length === 0) {
-    return toolText("No remote sessions found.");
+    return toolData("No remote sessions found.", { sessions: [] });
   }
   const lines = sessions.map((s, i) => {
     return [
@@ -1063,7 +1516,7 @@ async function listMySessions(args: Record<string, unknown>) {
       .filter(Boolean)
       .join("\n");
   });
-  return toolText(`Your remote sessions:\n\n${lines.join("\n\n")}`);
+  return toolData(`Your remote sessions:\n\n${lines.join("\n\n")}`, { sessions });
 }
 
 /**
@@ -1113,7 +1566,7 @@ async function quoteBooking(args: Record<string, unknown>) {
       (p: any) =>
         `   ${p.hours}h of usage ≈ ${p.budget_usd || dollars(p.budget_cents)}`,
     );
-    return toolText(
+    return toolData(
       [
         `Booking quote (METERED — billed per minute):`,
         ``,
@@ -1129,6 +1582,7 @@ async function quoteBooking(args: Record<string, unknown>) {
       ]
         .filter(Boolean)
         .join("\n"),
+      d as Record<string, unknown>,
     );
   }
 
@@ -1150,7 +1604,7 @@ async function quoteBooking(args: Record<string, unknown>) {
     ``,
     d.disclaimer || "This is an estimate; nothing is charged. Book with rigshare_create_booking.",
   ].filter((l) => l !== null);
-  return toolText(lines.join("\n"));
+  return toolData(lines.join("\n"), d as Record<string, unknown>);
 }
 
 async function createBooking(args: Record<string, unknown>) {
@@ -1367,6 +1821,7 @@ async function checkAvailability(args: Record<string, unknown>) {
   // Optional requested-range check: does [starts_at, ends_at) overlap any
   // blocked window? Half-open overlap: block.start < reqEnd && block.end > reqStart.
   let rangeNote = "";
+  let requestedRange: { starts_at?: string; ends_at?: string; available?: boolean } | undefined;
   const reqStart =
     typeof args.starts_at === "string" ? new Date(args.starts_at) : null;
   const reqEnd = typeof args.ends_at === "string" ? new Date(args.ends_at) : null;
@@ -1384,9 +1839,14 @@ async function checkAvailability(args: Record<string, unknown>) {
     rangeNote = overlaps
       ? `\nRequested range ${reqStart.toLocaleDateString()} → ${reqEnd.toLocaleDateString()}: OVERLAPS a blocked window — NOT available.`
       : `\nRequested range ${reqStart.toLocaleDateString()} → ${reqEnd.toLocaleDateString()}: free of blocked windows (subject to any existing renter bookings, which aren't listed here).`;
+    requestedRange = {
+      starts_at: String(args.starts_at),
+      ends_at: String(args.ends_at),
+      available: !overlaps,
+    };
   }
 
-  return toolText(
+  return toolData(
     [
       `Availability for external_id=${d.external_id} (equipment ${d.equipment_id}):`,
       ``,
@@ -1395,6 +1855,12 @@ async function checkAvailability(args: Record<string, unknown>) {
     ]
       .filter(Boolean)
       .join("\n"),
+    {
+      external_id: d.external_id,
+      equipment_id: d.equipment_id,
+      blocks,
+      ...(requestedRange ? { requested_range: requestedRange } : {}),
+    },
   );
 }
 
@@ -1651,7 +2117,7 @@ async function getSessionUsage(args: Record<string, unknown>) {
   const dollars = (cents: any) => `$${(((cents as number) || 0) / 100).toFixed(2)}`;
 
   if (d.finalized) {
-    return toolText(
+    return toolData(
       [
         `Metered session — SETTLED (billing closed):`,
         ``,
@@ -1660,6 +2126,7 @@ async function getSessionUsage(args: Record<string, unknown>) {
         `Minutes used: ${d.usedMinutes ?? 0}`,
         `Authorized budget: ${dollars(d.budgetCents)}`,
       ].join("\n"),
+      d as Record<string, unknown>,
     );
   }
 
@@ -1668,7 +2135,7 @@ async function getSessionUsage(args: Record<string, unknown>) {
     (o: any) => `   +${o.minutes} min ≈ ${dollars(o.costCents)}`,
   );
 
-  return toolText(
+  return toolData(
     [
       `Live metered usage:`,
       ``,
@@ -1683,6 +2150,7 @@ async function getSessionUsage(args: Record<string, unknown>) {
     ]
       .filter((l) => l !== null)
       .join("\n"),
+    d as Record<string, unknown>,
   );
 }
 
@@ -1760,30 +2228,171 @@ async function saveDraftListing(args: Record<string, unknown>) {
 
 // ─── HTTP + response helpers ────────────────────────────────────────
 
-async function fetchJson(url: string): Promise<{ data?: any; status?: number; error?: string }> {
+async function fetchJson(url: string): Promise<FetchResult> {
   try {
+    // Bounded timeout so a STALLED endpoint (TCP accepted, response withheld)
+    // can't block a caller for ~5 min (undici default) — e.g. get_owner_onboarding
+    // fetches /policy and must fall back to bundled copy promptly on a hang.
     const res = await fetch(url, {
       headers: {
         Accept: "application/json",
         "User-Agent": USER_AGENT,
       },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
+      // P-8: parse the server's JSON error body (aligns with fetchAuthJson's
+      // `data.error` extraction) and classify retryable (5xx) vs terminal (4xx),
+      // reflecting a machine-readable code in the message. S2: the request URL
+      // is logged to stderr, NEVER surfaced to the model.
+      const body = await res.json().catch(() => ({} as any));
+      const serverError =
+        body && typeof body === "object" ? (body as any).error : undefined;
+      const retryable = res.status >= 500;
+      const code = retryable ? "upstream_5xx" : "client_4xx";
+      console.error(
+        `[rigshare-mcp] GET ${url} -> HTTP ${res.status}${serverError ? `: ${serverError}` : ""}`,
+      );
       return {
         status: res.status,
-        error: `RIGShare API returned HTTP ${res.status} for ${url}`,
+        code,
+        retryable,
+        error: serverError
+          ? `RIGShare API error [${code}] (HTTP ${res.status}${retryable ? ", retryable" : ""}): ${serverError}`
+          : `RIGShare API returned HTTP ${res.status} [${code}]${retryable ? " — retryable, try again shortly" : ""}.`,
       };
     }
     const data = await res.json();
-    return { data, status: 200 };
+    return { data, status: res.status };
   } catch (err: any) {
-    return { error: err?.message || "Network error contacting RIGShare API" };
+    // S2: log the URL to stderr; keep it out of the client-facing string.
+    console.error(
+      `[rigshare-mcp] network error for ${url}:`,
+      err?.stack || err?.message || err,
+    );
+    return {
+      code: "network_error",
+      retryable: true,
+      error:
+        "Network error contacting RIGShare API [network_error] — retryable, try again shortly.",
+    };
   }
+}
+
+/**
+ * fetchJson with a short in-memory TTL (P-9). Only clean successes are cached —
+ * a transient 5xx/network error is never pinned for the whole TTL. Used for the
+ * slow-moving public GETs (categories + the /policy copy endpoint).
+ */
+async function fetchJsonCached(url: string, ttlMs: number): Promise<FetchResult> {
+  const now = Date.now();
+  const hit = publicJsonCache.get(url);
+  if (hit && hit.expires > now) return hit.value;
+  const res = await fetchJson(url);
+  if (!res.error && res.data !== undefined) {
+    publicJsonCache.set(url, { expires: now + ttlMs, value: res });
+  }
+  return res;
+}
+
+/**
+ * Fetch the canonical policy JSON (pricing/fee/deposit/onboarding facts) from
+ * the app — the single source of truth. Returns the raw parsed body, or null if
+ * the endpoint is unreachable (so callers fall back to BUNDLED_POLICY).
+ */
+async function fetchPolicyRaw(): Promise<any | null> {
+  const res = await fetchJsonCached(`${RIGSHARE_API}/policy`, PUBLIC_CACHE_TTL_MS);
+  return res.error || res.data === undefined ? null : res.data;
+}
+
+/**
+ * Merge the fetched policy over the BUNDLED_POLICY defaults, field by field, so
+ * the owner-onboarding tool ALWAYS has a complete, correctly-shaped object to
+ * render — whether the live endpoint was reachable, unreachable, or returned a
+ * partial payload. This is the graceful-fallback core: the tool can never break
+ * on missing/absent policy copy.
+ */
+function coercePolicy(p: any): NormalizedPolicy {
+  if (!p || typeof p !== "object") return BUNDLED_POLICY as unknown as NormalizedPolicy;
+  const B = BUNDLED_POLICY;
+  return {
+    version: typeof p.version === "string" ? p.version : B.version,
+    commission: { ...B.commission, ...(p.commission || {}) },
+    renter_service_fee: { ...B.renter_service_fee, ...(p.renter_service_fee || {}) },
+    subscription_prices: {
+      pro: { ...B.subscription_prices.pro, ...(p.subscription_prices?.pro || {}) },
+      enterprise: {
+        ...B.subscription_prices.enterprise,
+        ...(p.subscription_prices?.enterprise || {}),
+      },
+    },
+    listing_caps: { ...B.listing_caps, ...(p.listing_caps || {}) },
+    security_deposit: { ...B.security_deposit, ...(p.security_deposit || {}) },
+  };
+}
+
+/** Always returns a usable, complete policy object (live or bundled fallback). */
+async function getPolicy(): Promise<NormalizedPolicy> {
+  return coercePolicy(await fetchPolicyRaw());
+}
+
+// ─── Canonical-copy render helpers (sourced from /policy) ────────────
+function pctLabel(rate: number): string {
+  const v = rate * 100;
+  return `${Number.isInteger(v) ? v : Number(v.toFixed(2))}%`;
+}
+function usdFromCents(cents: number): string {
+  if (!cents) return "$0";
+  return `$${(cents / 100).toFixed(2)}`;
+}
+function capLabel(n: number): string {
+  return n === -1 || n == null ? "Unlimited" : `${n} listing${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Render the "## Economics" block from the canonical policy. Reproduces the
+ * previously-hardcoded copy EXACTLY when the policy matches the enforced
+ * constants — the whole point being that a price change in the app now flows
+ * here WITHOUT republishing this npm package.
+ */
+function renderEconomics(policy: NormalizedPolicy): string[] {
+  const c = policy.commission;
+  const fee = policy.renter_service_fee;
+  const sp = policy.subscription_prices;
+  const caps = policy.listing_caps;
+  const dep = policy.security_deposit;
+  return [
+    "## Economics",
+    "",
+    "| Tier | Monthly fee | Platform commission | Listings cap |",
+    "|---|---|---|---|",
+    `| Free | $0 | ${pctLabel(c.free)} | ${capLabel(caps.free)} |`,
+    `| Pro | ${usdFromCents(sp.pro.monthly_cents)} | ${pctLabel(c.pro)} | ${capLabel(caps.pro)} |`,
+    `| Enterprise | ${usdFromCents(sp.enterprise.monthly_cents)} | ${pctLabel(c.enterprise)} | ${capLabel(caps.enterprise)} |`,
+    "",
+    `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total (reduced to ${pctLabel(fee.student)} for verified students) — doesn't reduce your payout`,
+    `- ${pctLabel(dep.rate)} security-deposit authorization hold (minimum $${dep.min_usd}) on physical/FIXED rentals, released within 48h of clean return — protects you against damage. METERED per-minute Tech sessions have NO deposit — the renter authorizes a usage budget instead`,
+    "- Payouts via Stripe Connect, 48-hour hold after rental completion",
+    "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",
+    "",
+  ];
 }
 
 function toolText(text: string) {
   return {
     content: [{ type: "text" as const, text }],
+  };
+}
+
+/**
+ * Text + structuredContent (P-4). Used by the READ tools that declare an
+ * `outputSchema` — the text is unchanged, `structuredContent` is the normalized
+ * (mostly passthrough) parsed response so agents can machine-read the result.
+ */
+function toolData(text: string, structuredContent: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent,
   };
 }
 

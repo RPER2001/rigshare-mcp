@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2026-07-09
 
+### Added (additive modern-MCP surface — no change to existing tool behavior)
+- **MCP RESOURCES** (`capabilities.resources`). Five resources registered via
+  `server.registerResource`: `rigshare://pricing` + `rigshare://owner-onboarding`
+  (backed by a NEW app endpoint `GET /api/public/v1/policy`),
+  `rigshare://categories` (backed by `/api/public/v1/categories`), and static
+  `rigshare://terms` / `rigshare://how-it-works` (URL pointers to the web pages).
+- **Durable anti-drift: pricing/onboarding copy is now sourced from the app.**
+  `rigshare_get_owner_onboarding` renders its Economics block (commission tiers,
+  subscription prices, listing caps, renter service fee incl. student 3%,
+  security-deposit rate/minimum) LIVE from `/api/public/v1/policy` — the single
+  source of truth backed by the enforced constants (`subscriptions.ts`
+  `SUBSCRIPTION_TIERS` + `STUDENT_TIER`, `stripe.ts` `RENTER_SERVICE_FEE_RATE` /
+  `SECURITY_DEPOSIT_RATE` / `SECURITY_DEPOSIT_MIN`). A price change in the app now
+  flows to the tool WITHOUT republishing this package. **Graceful fallback:** if
+  the endpoint is unreachable the tool falls back to a bundled copy that mirrors
+  the constants, so it can never break; the policy fetch is cached ~10 min. The
+  division-specific signup/how-it-works URLs stay local.
+- **MCP PROMPTS** (`capabilities.prompts`). Three guided workflows via
+  `server.registerPrompt`: `rent-gpu` (search → get → quote → book tech compute),
+  `list-my-equipment` (onboarding → save draft → publish), and
+  `check-my-rentals` (list bookings + sessions + metered usage). Each renders a
+  concise template referencing the real tool names.
+- **`structuredContent` (P-4)** on the seven READ tools (`search_equipment`,
+  `get_equipment`, `quote_booking`, `list_my_bookings`, `list_my_sessions`,
+  `get_session_usage`, `check_availability`): each now declares a permissive Zod
+  `outputSchema` and returns the normalized (mostly passthrough) parsed response
+  as `structuredContent` ALONGSIDE the unchanged text, so agents can machine-read
+  results. Write tools are intentionally left text-only. Error results omit
+  `structuredContent` (the SDK skips output validation for `isError` results).
+
+### Changed (additive polish — no tool behavior change on valid input)
+- **P-8 error taxonomy on the public fetch path.** `fetchJson` now parses the
+  server's JSON error body (aligning with `fetchAuthJson`'s `data.error`
+  extraction) and classifies retryable (5xx / network → `upstream_5xx` /
+  `network_error`) vs. terminal (4xx → `client_4xx`), reflecting the code in the
+  message. **S2:** the request URL is no longer in the client-facing error string
+  (logged to stderr instead), matching `fetchAuthJson`.
+- **P-9 in-memory TTL cache** (~10 min) for the slow-moving public GETs — the
+  categories fetch and the new `/policy` fetch — so the resources + onboarding
+  tool don't re-hit the API on every call. Only clean successes are cached.
+- **NEW public app endpoint `GET /api/public/v1/policy`** (force-dynamic, no auth,
+  no secrets, cache-friendly headers): the canonical pricing / fee / deposit /
+  cancellation / draft-first-onboarding snapshot, sourced from the enforced
+  constants. `version` bumps on any canonical change.
+
 ### Changed (BREAKING — internal surface only; no tool behavior change)
 - **Migrated from the low-level `Server` API to the modern `McpServer` surface**
   of the official `@modelcontextprotocol/sdk` (bumped `^1.0.4` → `^1.29.0`; added

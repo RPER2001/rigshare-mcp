@@ -242,6 +242,133 @@ const badRes = await client.callTool({
 });
 check("get_equipment: invalid uuid rejected (isError)", badRes.isError === true);
 
+// ── (c) Resources + prompts registered (P2-b modern MCP surface) ─────
+console.log("\n[c] Resources + prompts registered:");
+const { resources } = await client.listResources();
+const resUris = new Set(resources.map((r) => r.uri));
+for (const uri of [
+  "rigshare://pricing",
+  "rigshare://owner-onboarding",
+  "rigshare://categories",
+  "rigshare://terms",
+  "rigshare://how-it-works",
+]) {
+  check(`resource ${uri} registered`, resUris.has(uri));
+}
+
+const { prompts } = await client.listPrompts();
+const promptNames = new Set(prompts.map((p) => p.name));
+for (const n of ["rent-gpu", "list-my-equipment", "check-my-rentals"]) {
+  check(`prompt ${n} registered`, promptNames.has(n));
+}
+// A prompt renders a template referencing the real tool names.
+const rentGpu = await client.getPrompt({
+  name: "rent-gpu",
+  arguments: { workload: "LLM fine-tuning", budget: "$200/day", region: "us-west" },
+});
+const rentGpuTxt = (rentGpu.messages || [])
+  .map((m) => (m.content?.text ? m.content.text : ""))
+  .join("\n");
+check(
+  "rent-gpu prompt references the real tool names",
+  rentGpuTxt.includes("rigshare_search_equipment") &&
+    rentGpuTxt.includes("rigshare_quote_booking") &&
+    rentGpuTxt.includes("rigshare_create_booking"),
+);
+check("rent-gpu prompt weaves in the args", rentGpuTxt.includes("LLM fine-tuning"));
+
+// A resource read returns JSON contents.
+const termsRes = await client.readResource({ uri: "rigshare://terms" });
+check(
+  "rigshare://terms read returns the terms URL",
+  (termsRes.contents || []).some((c) => (c.text || "").includes("rigshare.app/terms")),
+);
+
+// ── (d) structuredContent (P-4) on the READ tools ───────────────────
+console.log("\n[d] structuredContent (P-4):");
+check(
+  "search: structuredContent.listings has 1 row",
+  Array.isArray(searchRes.structuredContent?.listings) &&
+    searchRes.structuredContent.listings.length === 1,
+);
+check("search: structuredContent.total === 1", searchRes.structuredContent?.total === 1);
+check(
+  "search: structuredContent preserves the upstream row (title H100 Rig)",
+  searchRes.structuredContent?.listings?.[0]?.title === "H100 Rig",
+);
+check(
+  "quote: structuredContent carries total_amount_cents 14840",
+  quoteRes.structuredContent?.total_amount_cents === 14840,
+);
+// end_session is a WRITE tool — it has NO outputSchema and returns no structuredContent.
+check(
+  "end_session (write): no structuredContent (text-only, by design)",
+  endRes.structuredContent === undefined,
+);
+
+// ── (e) Owner-onboarding graceful fallback when /policy is unreachable ─
+console.log("\n[e] Owner-onboarding graceful fallback (/policy unreachable):");
+// Every fetch FAILS (503). The onboarding tool must still return the BUNDLED
+// pricing copy — never error, never hang. (/policy is not cached on failure.)
+globalThis.fetch = async () => ({
+  ok: false,
+  status: 503,
+  json: async () => ({ error: "policy endpoint down" }),
+});
+const onboardFallback = await client.callTool({
+  name: "rigshare_get_owner_onboarding",
+  arguments: { equipment_type: "H100 GPU server" },
+});
+const fallbackTxt = textOf(onboardFallback);
+check("onboarding: NOT an error despite /policy 503", onboardFallback.isError !== true);
+check(
+  "onboarding: renders bundled economics (Free 15% / Pro 10% / Enterprise 7%)",
+  fallbackTxt.includes("| Free | $0 | 15% | 5 listings |") &&
+    fallbackTxt.includes("| Pro | $49.99 | 10% | 15 listings |") &&
+    fallbackTxt.includes("| Enterprise | $149.99 | 7% | Unlimited |"),
+);
+check(
+  "onboarding: bundled fee + deposit copy (3% student / minimum $100)",
+  fallbackTxt.includes("reduced to 3% for verified students") &&
+    fallbackTxt.includes("minimum $100"),
+);
+check(
+  "onboarding: signup URL still present",
+  fallbackTxt.includes("rigshare.app/robotics-ai/register"),
+);
+
+// ── (f) Owner-onboarding renders LIVE /policy values when reachable ──
+console.log("\n[f] Owner-onboarding renders LIVE /policy values:");
+// Distinct-from-bundled values prove the copy is sourced from /policy, not the
+// hardcoded fallback. (Fallback above failed, so /policy is uncached.)
+globalThis.fetch = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    version: "live-test",
+    commission: { free: 0.2, pro: 0.12, enterprise: 0.08, student: 0.07 },
+    renter_service_fee: { standard: 0.07, student: 0.03 },
+    subscription_prices: {
+      pro: { monthly_cents: 5999, yearly_cents: 59900 },
+      enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
+    },
+    listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
+    security_deposit: { rate: 0.15, min_cents: 10000, min_usd: 100, metered: false },
+  }),
+});
+const onboardLive = await client.callTool({
+  name: "rigshare_get_owner_onboarding",
+  arguments: { equipment_type: "excavator" },
+});
+const liveTxt = textOf(onboardLive);
+check(
+  "onboarding: renders LIVE commission (Free 20% / Pro 12% / Enterprise 8%)",
+  liveTxt.includes("| Free | $0 | 20% |") &&
+    liveTxt.includes("12%") &&
+    liveTxt.includes("8%"),
+);
+check("onboarding: renders LIVE Pro price $59.99", liveTxt.includes("$59.99"));
+
 await client.close();
 await server.close();
 
