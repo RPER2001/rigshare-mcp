@@ -68,7 +68,7 @@ const RIGSHARE_V1_API =
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
@@ -685,6 +685,174 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "rigshare_cancel_booking",
+      description: [
+        "REQUIRES API KEY (bookings:write scope). MONEY PATH — cancels a booking",
+        "for the authenticated user AND issues any refund per RIGShare's published",
+        "cancellation policy. The refund is computed ENTIRELY server-side from the",
+        "booking's canonical charges and how far out the cancellation is (physical:",
+        "7+ days 100% / 3-6 days 75% / 1-2 days 50% / same-day 0%, with a 25%",
+        "high-value exception on >$5k multi-day rentals; Tech remote-access:",
+        "before-session 100% / within first hour 75% / after 0%). The 7% renter",
+        "service fee is non-refundable on renter cancellations. The client CANNOT",
+        "dictate the refund amount or reason code — pass only the booking id. The",
+        "security-deposit authorization hold is released (never captured). Safe on",
+        "terminal state: cancelling an already-cancelled/completed/disputed booking",
+        "returns an error, never a double refund. Returns the refund breakdown",
+        "(refunded, retained, deposit disposition). For a METERED session prefer",
+        "rigshare_end_session (settles exact usage); cancelling a metered booking",
+        "with usage settles like an early end.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["booking_id"],
+        properties: {
+          booking_id: {
+            type: "string",
+            format: "uuid",
+            description:
+              "The booking id to cancel (from rigshare_create_booking or rigshare_list_my_bookings).",
+          },
+          reason: {
+            type: "string",
+            maxLength: 500,
+            description:
+              "Optional free-text note for the audit trail. Does NOT affect the refund — the policy and refund are computed server-side from the booking, not from this field.",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_extend_session",
+      description: [
+        "REQUIRES API KEY (sessions:write scope). MONEY PATH — raises the authorized",
+        "per-minute budget on a running METERED (per-minute) Robotics & AI session,",
+        "so a renter whose budget is about to exhaust can keep going. The additional",
+        "authorization hold is placed and the budget raised SERVER-SIDE from the",
+        "equipment's canonical per-minute rate — the client never sets the charge.",
+        "Only the booking's RENTER can extend. Choose one of the fixed extension",
+        "lengths: 15, 30, or 60 minutes. Only actual usage is ever charged; call",
+        "rigshare_end_session when done to settle exact usage and release the unused",
+        "budget. Pairs with rigshare_get_session_usage (check remaining budget",
+        "first). Returns the newly authorized budget.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["booking_id", "additional_minutes"],
+        properties: {
+          booking_id: {
+            type: "string",
+            format: "uuid",
+            description:
+              "The METERED booking id whose session budget to raise (from rigshare_create_booking or rigshare_list_my_bookings).",
+          },
+          additional_minutes: {
+            type: "integer",
+            enum: [15, 30, 60],
+            description:
+              "How many more minutes of budget to authorize. Must be 15, 30, or 60.",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_get_session_usage",
+      description: [
+        "REQUIRES API KEY (sessions:read scope). Live budget snapshot for a METERED",
+        "(per-minute) Robotics & AI booking: authorized budget vs. what's been used,",
+        "accrued cost so far, a low-budget warning, and the available extension",
+        "options. Read-only — moves no money. Call this before a session runs out to",
+        "decide whether to rigshare_extend_session. Visible to the booking's renter",
+        "or the equipment owner.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["booking_id"],
+        properties: {
+          booking_id: {
+            type: "string",
+            format: "uuid",
+            description:
+              "The METERED booking id to inspect (from rigshare_create_booking or rigshare_list_my_bookings).",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_save_draft_listing",
+      description: [
+        "REQUIRES API KEY (equipment:write scope). Saves a HALF-FINISHED equipment",
+        "listing as a DRAFT on behalf of the authenticated OWNER — the same fields",
+        "as rigshare_create_listing, but nothing goes live. Drafts are UNGATED: no",
+        "identity verification and no Stripe Connect payout setup are needed to",
+        "DRAFT (matching RIGShare's draft-first flow). Those gates — plus at least",
+        "one photo — are required only when you PUBLISH (done on the web, or via the",
+        "drafts publish endpoint). No security_ack is required to draft a remote-",
+        "access listing; it's required at publish. Idempotent per draft_session_id",
+        "(repeat calls with the same id update the same draft). Returns the draft id",
+        "+ the draft_session_id to resume it. Use this when the owner isn't verified",
+        "yet or wants to finish the listing later.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        properties: {
+          draft_session_id: {
+            type: "string",
+            minLength: 8,
+            maxLength: 128,
+            description:
+              "Optional idempotency/resume key. Omit to have one generated (returned in the response). Reuse it to update the SAME draft instead of creating another.",
+          },
+          title: { type: "string", minLength: 1, maxLength: 200 },
+          description: { type: "string", maxLength: 5000 },
+          category: {
+            type: "string",
+            description:
+              "Exact category code — use rigshare_list_categories to discover valid values (e.g. AI_COMPUTE, EXCAVATORS).",
+          },
+          make: { type: "string", maxLength: 120 },
+          model: { type: "string", maxLength: 120 },
+          year: { type: "integer", minimum: 1950, maximum: 2035 },
+          condition: { type: "string", enum: ["EXCELLENT", "GOOD", "FAIR"] },
+          daily_rate_usd: { type: "number", minimum: 0, maximum: 100000 },
+          hourly_rate_usd: {
+            type: "number",
+            minimum: 0,
+            maximum: 100000,
+            description: "Per-minute metering basis when billing_mode is METERED.",
+          },
+          weekly_rate_usd: { type: "number", minimum: 0, maximum: 500000 },
+          monthly_rate_usd: { type: "number", minimum: 0, maximum: 2000000 },
+          city: { type: "string", maxLength: 120 },
+          state: { type: "string", description: "Two-letter US state code." },
+          zip: { type: "string", description: "5-digit US zip code." },
+          booking_type: {
+            type: "string",
+            enum: ["INSTANT", "REQUEST"],
+            description: "INSTANT = book without approval; REQUEST = owner approves each booking.",
+          },
+          billing_mode: {
+            type: "string",
+            enum: ["FIXED", "METERED"],
+            description: "METERED = per-minute (remote-access Tech only; needs hourly_rate_usd). Coherence is re-checked at publish.",
+          },
+          remote_access: {
+            type: "object",
+            description:
+              "Robotics & AI categories only — remote-access config. No security_ack needed to DRAFT (required at publish).",
+            properties: {
+              access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
+              endpoint: { type: "string", format: "uri", description: "HTTPS endpoint (SSRF-validated at write)." },
+              specs: { type: "string", maxLength: 2000 },
+              region: { type: "string", maxLength: 120 },
+              max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
+              require_mfa: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
   ],
 }));
 
@@ -720,6 +888,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await startSession(args || {});
       case "rigshare_end_session":
         return await endSession(args || {});
+      case "rigshare_cancel_booking":
+        return await cancelBooking(args || {});
+      case "rigshare_extend_session":
+        return await extendSession(args || {});
+      case "rigshare_get_session_usage":
+        return await getSessionUsage(args || {});
+      case "rigshare_save_draft_listing":
+        return await saveDraftListing(args || {});
       default:
         return toolError(`Unknown tool: ${name}`);
     }
@@ -1663,6 +1839,233 @@ async function endSession(args: Record<string, unknown>) {
       `Settled cost: $${Number(billedUsd).toFixed(2)}`,
       `The per-minute meter has stopped; the unused portion of the authorized budget has been released.`,
     ].join("\n"),
+  );
+}
+
+/**
+ * MONEY PATH — cancel a booking and issue any refund per the cancellation
+ * policy. The endpoint computes the refund SERVER-SIDE from the booking's
+ * canonical charges (the client sends only the booking id + an optional audit
+ * note); it never accepts a client-dictated amount, releases the deposit hold,
+ * and is terminal-state-safe (no double refund). We render the returned
+ * breakdown so an agent can confirm what was refunded/retained with the renter.
+ */
+async function cancelBooking(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
+    return toolError("booking_id must be a valid UUID");
+  }
+  const body: Record<string, unknown> = {};
+  if (typeof args.reason === "string" && args.reason.trim()) body.reason = args.reason.trim();
+
+  const res = await fetchAuthJson(
+    RIGSHARE_API_KEY,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/cancel`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  if (res.error) return toolError(res.error);
+
+  // Flat payload (envelope unwrapped by fetchAuthJson): booking_id, status,
+  // billing_mode, policy_rule, refund{...}, deposit{...}, settled?, billed_*.
+  const d = (res.data || {}) as any;
+  const refund = d.refund || {};
+  const deposit = d.deposit || {};
+  const usd = (u: any, cents: any) =>
+    typeof u === "number" ? `$${u.toFixed(2)}` : `$${(((cents as number) || 0) / 100).toFixed(2)}`;
+
+  const lines = [
+    `Booking cancelled:`,
+    ``,
+    `Booking ID: ${d.booking_id || args.booking_id}`,
+    `Status: ${d.status || "CANCELLED"}`,
+    d.policy_rule ? `Policy applied: ${d.policy_rule}` : null,
+    ``,
+    `Refunded to renter: ${usd(refund.amount_usd, refund.amount_cents)}`,
+    (refund.retained_cents || 0) > 0
+      ? `Retained (non-refundable per policy, e.g. service fee): ${usd(refund.retained_usd, refund.retained_cents)}`
+      : null,
+    deposit.had_hold
+      ? `Security deposit hold: ${usd(deposit.amount_usd, deposit.amount_cents)} — ${deposit.disposition === "released" ? "released (not charged)" : deposit.disposition}`
+      : `Security deposit: none held`,
+    d.settled
+      ? `Metered usage settled: ${usd(d.billed_usd, d.billed_cents)} charged for actual usage`
+      : null,
+    ``,
+    `This cancels the booking and issues any refund per policy. The refund was computed server-side; it cannot be re-issued (terminal-safe).`,
+  ].filter((l) => l !== null);
+  return toolText(lines.join("\n"));
+}
+
+/**
+ * MONEY PATH — raise the authorized per-minute budget on a running METERED
+ * session. The additional hold + budget increase are computed server-side from
+ * the canonical per-minute rate; the client only picks a fixed extension length
+ * (15/30/60 min). Renders the newly authorized budget.
+ */
+async function extendSession(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
+    return toolError("booking_id must be a valid UUID");
+  }
+  if (![15, 30, 60].includes(Number(args.additional_minutes))) {
+    return toolError("additional_minutes is required and must be 15, 30, or 60");
+  }
+
+  const res = await fetchAuthJson(
+    RIGSHARE_API_KEY,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/extend`,
+    { method: "POST", body: JSON.stringify({ additional_minutes: Number(args.additional_minutes) }) },
+  );
+  if (res.error) return toolError(res.error);
+
+  const d = (res.data || {}) as any;
+  const usd = (u: any, cents: any) =>
+    typeof u === "number" ? `$${u.toFixed(2)}` : `$${(((cents as number) || 0) / 100).toFixed(2)}`;
+
+  return toolText(
+    [
+      `Session budget extended:`,
+      ``,
+      `Booking ID: ${d.booking_id || args.booking_id}`,
+      `Added: ${d.added_minutes ?? args.additional_minutes} minutes of budget`,
+      `Additional authorization hold: ${usd(d.added_authorization_usd, d.added_authorization_cents)}`,
+      `New total authorized budget: ${usd(d.new_authorized_budget_usd, d.new_authorized_budget_cents)}`,
+      ``,
+      `Only actual usage is charged — call rigshare_end_session when done to settle and release the unused budget.`,
+    ].join("\n"),
+  );
+}
+
+/**
+ * READ — live metered-usage snapshot (authorized vs used budget, accrued cost,
+ * low-budget warning, extension options). Pairs with rigshare_extend_session.
+ */
+async function getSessionUsage(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
+    return toolError("booking_id must be a valid UUID");
+  }
+
+  const res = await fetchAuthJson(
+    RIGSHARE_API_KEY,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/meter`,
+  );
+  if (res.error) return toolError(res.error);
+
+  // Flat payload: booking_id + the accrual (usedMinutes, usageCents,
+  // serviceFeeCents, totalCents, budgetCents, rateHourlyCents, remainingMinutes,
+  // hasActiveSession) + finalized, billedCents, lowBudget, extensionOptions.
+  const d = (res.data || {}) as any;
+  const dollars = (cents: any) => `$${(((cents as number) || 0) / 100).toFixed(2)}`;
+
+  if (d.finalized) {
+    return toolText(
+      [
+        `Metered session — SETTLED (billing closed):`,
+        ``,
+        `Booking ID: ${d.booking_id || args.booking_id}`,
+        `Final settled cost: ${dollars(d.billedCents)}`,
+        `Minutes used: ${d.usedMinutes ?? 0}`,
+        `Authorized budget: ${dollars(d.budgetCents)}`,
+      ].join("\n"),
+    );
+  }
+
+  const options = Array.isArray(d.extensionOptions) ? d.extensionOptions : [];
+  const optionLines = options.map(
+    (o: any) => `   +${o.minutes} min ≈ ${dollars(o.costCents)}`,
+  );
+
+  return toolText(
+    [
+      `Live metered usage:`,
+      ``,
+      `Booking ID: ${d.booking_id || args.booking_id}`,
+      `Rate: ${dollars(d.rateHourlyCents)}/hr`,
+      `Authorized budget: ${dollars(d.budgetCents)}`,
+      `Accrued so far: ${dollars(d.totalCents)} (usage ${dollars(d.usageCents)} + fees ${dollars(d.serviceFeeCents)}) over ${d.usedMinutes ?? 0} min`,
+      `Remaining budget: ~${d.remainingMinutes ?? 0} more minutes affordable`,
+      `Active session: ${d.hasActiveSession ? "yes" : "no"}`,
+      d.lowBudget ? `⚠ LOW BUDGET — extend soon (rigshare_extend_session) to avoid an auto-stop.` : null,
+      optionLines.length ? `\nExtension options:\n${optionLines.join("\n")}` : "",
+    ]
+      .filter((l) => l !== null)
+      .join("\n"),
+  );
+}
+
+/**
+ * Save a half-finished listing as a DRAFT (equipment:write). Same fields as
+ * rigshare_create_listing, but nothing publishes — no identity/Connect gate to
+ * DRAFT. Publish (which enforces identity + Stripe Connect + a photo) happens
+ * later on the web. Idempotent per draft_session_id.
+ */
+async function saveDraftListing(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  const body: Record<string, unknown> = {};
+  if (args.draft_session_id) body.draft_session_id = args.draft_session_id;
+  if (args.category) body.category = args.category;
+  if (args.title) body.title = args.title;
+  if (args.description) body.description = args.description;
+  if (args.make) body.make = args.make;
+  if (args.model) body.model = args.model;
+  if (typeof args.year === "number") body.year = args.year;
+  if (args.condition) body.condition = args.condition;
+  if (typeof args.daily_rate_usd === "number") body.daily_rate_usd = args.daily_rate_usd;
+  if (typeof args.hourly_rate_usd === "number") body.hourly_rate_usd = args.hourly_rate_usd;
+  if (typeof args.weekly_rate_usd === "number") body.weekly_rate_usd = args.weekly_rate_usd;
+  if (typeof args.monthly_rate_usd === "number") body.monthly_rate_usd = args.monthly_rate_usd;
+  if (args.city) body.city = args.city;
+  if (args.state) body.state = args.state;
+  if (args.zip) body.zip = args.zip;
+  if (args.booking_type) body.booking_type = args.booking_type;
+  if (args.billing_mode) body.billing_mode = args.billing_mode;
+  if (args.remote_access && typeof args.remote_access === "object") {
+    const ra = args.remote_access as Record<string, unknown>;
+    body.remote_access = {
+      access_type: ra.access_type,
+      endpoint: ra.endpoint,
+      specs: ra.specs,
+      region: ra.region,
+      max_concurrent: ra.max_concurrent,
+      require_mfa: ra.require_mfa,
+    };
+  }
+
+  const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_AGENT_API}/drafts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  // A field-validation failure still returns the draft_id (the row was created
+  // and is resumable) — surface it so the agent can fix and retry.
+  if (res.error) {
+    const draftId = (res.data as any)?.draft_id;
+    const sid = (res.data as any)?.draft_session_id;
+    return toolError(
+      draftId
+        ? `${res.error} (draft saved as ${draftId}${sid ? `, session ${sid}` : ""} — fix the field and re-save with the same draft_session_id).`
+        : res.error,
+    );
+  }
+
+  const d = (res.data || {}) as any;
+  return toolText(
+    [
+      `Listing saved as draft:`,
+      ``,
+      `Draft ID: ${d.draft_id || "—"}`,
+      `Resume key (draft_session_id): ${d.draft_session_id || "—"}`,
+      d.is_new === false ? `(updated the existing draft for this session)` : null,
+      ``,
+      d.note ||
+        "Saved as draft — publish when ready (identity + payout setup happen at publish, not now).",
+    ]
+      .filter((l) => l !== null)
+      .join("\n"),
   );
 }
 

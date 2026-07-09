@@ -5,6 +5,50 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-07-09
+
+### Added
+- **`rigshare_cancel_booking`** (MONEY PATH, bookings:write scope) — cancels a
+  booking for the authenticated user AND issues any refund per RIGShare's
+  published cancellation policy. The refund is computed ENTIRELY server-side from
+  the booking's canonical charges + how far out the cancellation is (physical:
+  7+d 100% / 3-6d 75% / 1-2d 50% / same-day 0%, 25% on >$5k multi-day; Tech
+  remote: before-session 100% / first-hour 75% / after 0%; 7% renter service fee
+  non-refundable on renter cancels). The client CANNOT dictate the refund amount
+  or the trigger — it sends only the booking id (plus an optional audit note that
+  never affects the refund). The security-deposit hold is released (never
+  captured). Terminal-safe: cancelling an already-cancelled/completed/disputed
+  booking errors, never double-refunds. Returns the refund breakdown (refunded /
+  retained / deposit disposition). Backed by a NEW endpoint,
+  `POST /api/v1/agent/bookings/[id]/cancel`, which routes through the SAME
+  `updateBookingStatusForUser` core (→ `processAutoRefund`) the web + mobile use;
+  the trigger is derived from the authenticated role, so an agent can't inject
+  `OWNER_NO_SHOW` for a full refund.
+- **`rigshare_extend_session`** (MONEY PATH, sessions:write scope) — raises the
+  authorized per-minute budget on a running METERED (per-minute) Robotics & AI
+  session so a renter about to hit their cap can keep going. The additional
+  authorization hold + budget increase are computed SERVER-SIDE from the
+  equipment's canonical per-minute rate (client picks only a fixed 15/30/60-min
+  length); only actual usage is ever charged. Renter-only. Backed by a NEW
+  endpoint, `POST /api/v1/agent/bookings/[id]/extend`, routing through the SHARED
+  `extendMeterSessionForUser` core. Pairs with `rigshare_get_session_usage`.
+- **`rigshare_get_session_usage`** (READ, sessions:read scope) — live budget
+  snapshot for a METERED booking: authorized budget vs. used, accrued cost, a
+  low-budget warning, and the extension options. Read-only (moves no money).
+  Backed by a NEW endpoint, `GET /api/v1/agent/bookings/[id]/meter`, routing
+  through the SHARED `getMeterUsageForUser` core (renter or owner). Pairs with
+  `rigshare_extend_session`.
+- **`rigshare_save_draft_listing`** (equipment:write scope) — saves a
+  half-finished listing as a DRAFT (same fields as `rigshare_create_listing`, but
+  nothing goes live). Drafts are UNGATED: no identity verification and no Stripe
+  Connect payout setup are required to DRAFT (matching RIGShare's draft-first
+  flow); those gates + a photo are enforced only at PUBLISH. Idempotent per
+  `draft_session_id`. Backed by a NEW endpoint, `POST /api/v1/agent/drafts`, that
+  reuses the SAME `createDraftFromPhotosForUser` + `updateDraftForUser` cores the
+  mobile draft flow uses. A companion `POST /api/v1/agent/drafts/[id]/publish`
+  endpoint (reusing `publishDraftForUser`) flips a draft → ACTIVE with the full
+  publish-time gate stack intact.
+
 ## [1.5.0] - 2026-07-09
 
 ### Added

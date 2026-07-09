@@ -6,18 +6,18 @@
     "url": "https://github.com/RPER2001/rigshare-mcp",
     "source": "github"
   },
-  "version": "1.3.0",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "rigshare-mcp",
-      "version": "1.3.0",
+      "version": "1.6.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "RIGShare API key (Bearer format). Required only for the authenticated tools: rigshare_list_my_bookings, rigshare_list_my_sessions, rigshare_create_booking. Without it, the four public read-only tools still work. Get a key at https://www.rigshare.app/profile#api-keys or contact support@rigshare.app.",
+          "description": "RIGShare API key (Bearer format). Required for the authenticated tools (booking, listing, session, quote, availability, cancel, extend, usage, and draft management). Without it, the public read-only tools (search, get equipment, list categories, owner onboarding) still work. Get a key at https://www.rigshare.app/profile#api-keys or contact support@rigshare.app.",
           "isRequired": false,
           "format": "string",
           "isSecret": true,
