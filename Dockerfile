@@ -16,11 +16,12 @@
 FROM node:20-alpine
 
 # Install the published rigshare-mcp package globally from the npm
-# registry. Pinned to a specific version so the hosted image is
-# reproducible; bump when publishing new versions. The published
-# package already includes the compiled dist/index.js, so no build
-# step is needed inside the container.
-RUN npm install -g rigshare-mcp@1.1.3
+# registry. Tracks @latest ON PURPOSE: a hard version pin here silently
+# rotted (the image shipped 1.1.3 long after 2.0.0 published), so a fresh
+# hosted build should always pull the current release — no manual "bump on
+# publish" step to forget. The published package already includes the
+# compiled dist/index.js, so no build step is needed inside the container.
+RUN npm install -g rigshare-mcp@latest
 
 # The MCP server reads protocol on stdin, writes to stdout, and logs
 # to stderr. Glama/Smithery infrastructure wraps this stdio transport
