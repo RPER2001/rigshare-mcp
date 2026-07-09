@@ -40,22 +40,35 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-const RIGSHARE_API =
-  process.env.RIGSHARE_API_BASE || "https://www.rigshare.app/api/public/v1";
-// Authenticated endpoints for create-booking / list-my-bookings /
-// list-my-sessions. Lives on the main /api/v1/agent surface which
-// requires a Bearer API key + matching scopes.
+// Single source of truth for the RIGShare host. Every API base derives from
+// it, so pointing the server at staging/self-hosted is one env var. Trailing
+// slashes are tolerated. Default is the production Construction host — Tech
+// (tech.rigshare.app) shares the same backend, so this base is correct for
+// both divisions.
+const RIGSHARE_BASE = (
+  process.env.RIGSHARE_BASE || "https://www.rigshare.app"
+).replace(/\/+$/, "");
+// Public, unauthenticated browse surface (search / get / categories).
+const RIGSHARE_API = process.env.RIGSHARE_API_BASE || `${RIGSHARE_BASE}/api/public/v1`;
+// Authenticated agent surface for create-booking / list-my-bookings /
+// list-my-sessions / start+end-session. Requires a Bearer API key + scopes.
 const RIGSHARE_AGENT_API =
-  process.env.RIGSHARE_AGENT_API_BASE || "https://www.rigshare.app/api/v1/agent";
-// Owner-side sync surface (equipment create/list) lives at /api/v1, one
-// level above the agent namespace.
-const RIGSHARE_V1_API = RIGSHARE_AGENT_API.replace(/\/agent\/?$/, "");
+  process.env.RIGSHARE_AGENT_API_BASE || `${RIGSHARE_BASE}/api/v1/agent`;
+// Owner-side sync surface (equipment create/list) lives at /api/v1, one level
+// above the agent namespace. Prefer an explicit override; otherwise, for
+// back-compat with pre-1.4.0 configs that only set RIGSHARE_AGENT_API_BASE,
+// derive it from that base (strip the trailing /agent); else from RIGSHARE_BASE.
+const RIGSHARE_V1_API =
+  process.env.RIGSHARE_V1_API_BASE ||
+  (process.env.RIGSHARE_AGENT_API_BASE
+    ? process.env.RIGSHARE_AGENT_API_BASE.replace(/\/agent\/?$/, "")
+    : `${RIGSHARE_BASE}/api/v1`);
 // Optional. If set, the write/auth tools (create_booking etc.) are
 // enabled. Without it, those tools return a descriptive error pointing
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
@@ -111,6 +124,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             enum: ["SSH", "JUPYTER", "DESKTOP", "API"],
             description: "Filter to a specific remote access type.",
+          },
+          compute_architecture: {
+            type: "string",
+            enum: ["CUDA", "ROCM", "APPLE_SILICON", "TPU", "TRAINIUM", "CPU"],
+            description:
+              "Accelerator family for AI compute listings (mainly AI_COMPUTE). AI frameworks are architecture-locked, so filter to what the workload can run on: CUDA = NVIDIA, ROCM = AMD, APPLE_SILICON, TPU = Google, TRAINIUM = AWS, CPU = no accelerator.",
           },
           search: {
             type: "string",
@@ -416,7 +435,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           remote_access: {
             type: "object",
-            description: "Robotics & AI categories only — configure how renters connect over the network.",
+            description:
+              "Robotics & AI categories only — configure how renters connect over the network. When provided, security_ack MUST be true or the listing cannot be published.",
+            required: ["security_ack"],
             properties: {
               access_type: { type: "string", enum: ["SSH", "JUPYTER", "DESKTOP", "API"] },
               endpoint: { type: "string", format: "uri", description: "HTTPS endpoint RIGShare proxies renter traffic to (SSRF-validated)." },
@@ -424,6 +445,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               region: { type: "string", maxLength: 100 },
               max_concurrent: { type: "integer", minimum: 1, maximum: 1000 },
               require_mfa: { type: "boolean", description: "Require TOTP MFA from renters before sessions (recommended for sensitive hardware)." },
+              security_ack: {
+                type: "boolean",
+                description:
+                  "REQUIRED WHEN remote_access is provided. You attest the endpoint is secured and you accept RIGShare's Terms & Liability Waiver. Required to publish any remote-access listing — the backend hard-rejects a remote create without it.",
+              },
             },
           },
           billing_mode: {
@@ -447,9 +473,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "CONFIRMED Robotics & AI booking (SSH / Jupyter / VNC / API access).",
         "Returns the session access token — shown ONCE, store it securely —",
         "plus the connection URL and allocated specs. For METERED bookings the",
-        "per-minute clock runs while the session is active; end the session or",
-        "the booking to settle for exact usage. Equipment that requires MFA",
-        "cannot be started via API key — the renter must use the web app.",
+        "per-minute clock runs while the session is active; call",
+        "rigshare_end_session (or end the booking) to settle for exact usage.",
+        "Equipment that requires MFA cannot be started via API key — the renter",
+        "must use the web app.",
       ].join(" "),
       inputSchema: {
         type: "object",
@@ -459,6 +486,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             format: "uuid",
             description: "A CONFIRMED booking id from rigshare_create_booking or rigshare_list_my_bookings.",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_end_session",
+      description: [
+        "REQUIRES API KEY (sessions:write scope). Ends the METERED (per-minute)",
+        "billing clock on a Robotics & AI booking that rigshare_start_session",
+        "started: the server settles the charge for EXACT usage and releases the",
+        "unused portion of the authorized budget. Call this as soon as the renter",
+        "is done — otherwise the per-minute meter keeps running until a heartbeat",
+        "hard-stop or the budget is exhausted, overcharging the renter. Returns",
+        "the final compute hours + settled cost. Idempotent and safe: a booking",
+        "whose billing is already settled returns an error, never a double charge",
+        "(the server recomputes everything; client amounts are ignored).",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["booking_id"],
+        properties: {
+          booking_id: {
+            type: "string",
+            format: "uuid",
+            description:
+              "The METERED booking id whose session clock should be stopped and settled (from rigshare_create_booking or rigshare_list_my_bookings).",
           },
         },
       },
@@ -490,11 +543,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await createListing(args || {});
       case "rigshare_start_session":
         return await startSession(args || {});
+      case "rigshare_end_session":
+        return await endSession(args || {});
       default:
         return toolError(`Unknown tool: ${name}`);
     }
   } catch (err: any) {
-    return toolError(err?.message || "Unknown error");
+    // Never echo raw internal error text to the model/user — log the full
+    // detail to stderr (stdout is reserved for MCP protocol traffic) and
+    // return a generic, non-leaky message.
+    console.error(
+      `[rigshare-mcp] tool "${name}" threw:`,
+      err?.stack || err?.message || err,
+    );
+    return toolError(
+      "The RIGShare MCP server hit an unexpected error. Check the server logs (stderr) for details.",
+    );
   }
 });
 
@@ -507,6 +571,8 @@ async function searchEquipment(args: Record<string, unknown>) {
   if (args.category) params.set("category", String(args.category));
   if (args.remote_only) params.set("remote_only", "true");
   if (args.access_type) params.set("access_type", String(args.access_type));
+  if (args.compute_architecture)
+    params.set("compute_architecture", String(args.compute_architecture));
   if (args.search) params.set("search", String(args.search));
   if (args.city) params.set("city", String(args.city));
   if (args.state) params.set("state", String(args.state));
@@ -547,14 +613,17 @@ async function searchEquipment(args: Record<string, unknown>) {
   }
 
   // Compact text output — MCP clients render this directly in the chat.
-  // Each listing takes ~4 lines; cap at 10 for the chat to stay readable.
-  const capped = listings.slice(0, 10);
-  const extra = listings.length - capped.length;
-  const lines = capped.map((l, i) => {
+  // Render EVERY row this page returned. (Previously we sliced to 10 and said
+  // "N more omitted" — but the omitted rows were unreachable: bumping `page`
+  // skips them, since page 2 starts after the full server-side `limit`. Now the
+  // caller's `limit` alone decides how many come back, and all are shown.)
+  const lines = listings.map((l, i) => {
     const rateStr = [
       l.rates_usd?.hourly ? `$${l.rates_usd.hourly}/hr` : null,
+      l.rates_usd?.four_hour ? `$${l.rates_usd.four_hour}/4hr` : null,
       l.rates_usd?.daily ? `$${l.rates_usd.daily}/day` : null,
       l.rates_usd?.weekly ? `$${l.rates_usd.weekly}/wk` : null,
+      l.rates_usd?.monthly ? `$${l.rates_usd.monthly}/mo` : null,
     ]
       .filter(Boolean)
       .join(" · ");
@@ -564,6 +633,7 @@ async function searchEquipment(args: Record<string, unknown>) {
           /^, $/,
           "location TBD",
         );
+    const arch = l.compute_architecture ? ` · ${l.compute_architecture}` : "";
     const mfa = l.remote_access?.requires_mfa ? " · MFA required" : "";
     const metered =
       l.billing?.mode === "METERED"
@@ -571,12 +641,12 @@ async function searchEquipment(args: Record<string, unknown>) {
         : "";
     return [
       `${i + 1}. ${l.title} (${l.division}/${l.category})`,
-      `   ${rateStr}${rateStr ? " · " : ""}${location}${mfa}${metered}`,
+      `   ${rateStr}${rateStr ? " · " : ""}${location}${arch}${mfa}${metered}`,
       `   Rating: ${l.rating?.average ?? "—"} (${l.rating?.count ?? 0} reviews)`,
       `   URL: ${l.url}`,
     ].join("\n");
   });
-  const header = `Found ${pagination.total ?? listings.length} matching listings (page ${pagination.page ?? 1} of ${pagination.total_pages ?? 1}). Showing ${capped.length}${extra > 0 ? `, ${extra} more on this page omitted` : ""}:`;
+  const header = `Found ${pagination.total ?? listings.length} matching listings (page ${pagination.page ?? 1} of ${pagination.total_pages ?? 1}). Showing ${listings.length} on this page:`;
   return toolText(`${header}\n\n${lines.join("\n\n")}`);
 }
 
@@ -706,8 +776,8 @@ function getOwnerOnboarding(args: Record<string, unknown>) {
     "| Pro | $49.99 | 10% | 15 listings |",
     "| Enterprise | $149.99 | 7% | Unlimited |",
     "",
-    "- Renters pay a 7% service fee on top of your rental total (doesn't reduce your payout)",
-    "- 15% security deposit (authorization hold) on every rental, released within 48h of clean return — protects you against damage",
+    "- Renters pay up to a 7% service fee on top of your rental total (reduced to 3% for verified students) — doesn't reduce your payout",
+    "- 15% security-deposit authorization hold (minimum $100) on physical/FIXED rentals, released within 48h of clean return — protects you against damage. METERED per-minute Tech sessions have NO deposit — the renter authorizes a usage budget instead",
     "- Payouts via Stripe Connect, 48-hour hold after rental completion",
     "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",
     "",
@@ -760,20 +830,18 @@ function getOwnerOnboarding(args: Record<string, unknown>) {
   sections.push(
     "## How to list",
     "",
-    looksRoboticsAi
-      ? "1. Sign up at **https://www.rigshare.app/robotics-ai/register** (or log in if you're already a renter)"
-      : "1. Sign up at **https://www.rigshare.app/signup** (or log in if you're already a renter)",
-    "2. Complete Stripe Identity verification (~3 min, one-time)",
-    "3. Complete Stripe Connect onboarding for payouts (~5 min, one-time)",
-    looksRoboticsAi
-      ? "4. Go to **https://www.rigshare.app/robotics-ai/list** to create your first listing"
-      : "4. Go to **https://www.rigshare.app/list-equipment** to create your first listing",
-    looksRoboticsAi
-      ? "5. For remote-access gear: configure your endpoint URL (HTTPS required) + optional API key. RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
-      : "5. Upload 4–5 angle photos (front, sides, back; 5 required for engine-based categories). Set your hourly/daily/weekly/monthly rates. Set availability and delivery radius.",
-    "6. Publish — once live, renters can book immediately and you get a notification.",
+    "RIGShare is **draft-first** — start building your listing immediately; no verification is required up front.",
     "",
-    "**Listing directly from this chat:** if you have a RIGShare API key with the `equipment:write` scope (create one at https://www.rigshare.app/profile#api-keys after the one-time verification + payout setup above), the agent can publish the listing for you right now via the `rigshare_create_listing` tool — title, rates, photos (https URLs), and remote-access config for tech hardware. Identity verification and Stripe Connect onboarding still have to be done once on the web first.",
+    looksRoboticsAi
+      ? "1. Sign up at **https://www.rigshare.app/robotics-ai/register** (or log in if you already have an account)."
+      : "1. Sign up at **https://www.rigshare.app/signup** (or log in if you already have an account).",
+    looksRoboticsAi
+      ? "2. Start your listing right away at **https://www.rigshare.app/robotics-ai/list** — no verification needed to DRAFT: add your title, rates, photos, and specs. For remote-access gear, configure your endpoint URL (HTTPS required) + optional API key; RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
+      : "2. Start your listing right away at **https://www.rigshare.app/list-equipment** — no verification needed to DRAFT: add your title, hourly/daily/weekly/monthly rates, photos (front, sides, back; 5 required for engine-based categories), and specs. Set availability and delivery radius.",
+    "3. When you hit **Publish**, RIGShare walks you through the one-time setup just-in-time: identity verification (Stripe Identity, ~3 min) and Stripe Connect payout onboarding (~5 min). You only do this once.",
+    "4. Publish — your listing goes live, renters can book immediately, and you get a notification on each booking.",
+    "",
+    "**Listing directly from this chat:** if you have a RIGShare API key with the `equipment:write` scope (create one at https://www.rigshare.app/profile#api-keys), the agent can publish a listing for you right now via the `rigshare_create_listing` tool — title, rates, photos (https URLs), and remote-access config for tech hardware. Note: the direct API path has **no draft step — it publishes immediately**, so for that path your identity verification and Stripe Connect payout setup must already be done once on the web first (the tool's error tells you where if not).",
     "",
     "## Ongoing",
     "",
@@ -1013,6 +1081,15 @@ async function createListing(args: Record<string, unknown>) {
   }
 
   const remote = (args.remote_access || undefined) as Record<string, unknown> | undefined;
+  // Remote-access listings are legally un-publishable without the security
+  // attestation — the backend hard-rejects a remote create when it's falsy
+  // (app/_actions/equipment.ts). Fail fast with an actionable message instead
+  // of letting the agent eat an opaque backend 400.
+  if (remote && remote.security_ack !== true) {
+    return toolError(
+      "Remote-access listings require security_ack: true — you attest the endpoint is secured and accept the Terms & Liability Waiver.",
+    );
+  }
   const body: Record<string, unknown> = {
     title: args.title,
     description: args.description,
@@ -1040,6 +1117,9 @@ async function createListing(args: Record<string, unknown>) {
             region: remote.region,
             max_concurrent: remote.max_concurrent,
             require_mfa: remote.require_mfa,
+            // Legal attestation — threaded through to remoteSecurityAck on the
+            // sync route; the shared core rejects a remote create without it.
+            security_ack: remote.security_ack,
           },
         }
       : {}),
@@ -1115,10 +1195,53 @@ async function startSession(args: Record<string, unknown>) {
         : null,
       specs.length ? specs.join(" · ") : null,
       ``,
-      `If this booking is METERED, the per-minute clock is now running — end the session when done to settle for exact usage.`,
+      `If this booking is METERED, the per-minute clock is now running — call rigshare_end_session when done to settle for exact usage.`,
     ]
       .filter((l) => l !== null)
       .join("\n"),
+  );
+}
+
+/**
+ * End a metered booking's per-minute clock and settle for exact usage.
+ * Money-safety counterpart to startSession — the server recomputes the charge
+ * (client amounts are never trusted) and releases the unused budget.
+ */
+async function endSession(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  if (typeof args.booking_id !== "string" || !/^[0-9a-f-]{36}$/i.test(args.booking_id)) {
+    return toolError("booking_id must be a valid UUID");
+  }
+
+  const res = await fetchAuthJson(
+    RIGSHARE_API_KEY,
+    `${RIGSHARE_AGENT_API}/bookings/${encodeURIComponent(args.booking_id)}/end`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+  if (res.error) return toolError(res.error);
+
+  // Response payload is FLAT (envelope unwrapped by fetchAuthJson):
+  // booking_id, settled, billed_cents, billed_usd, used_minutes, compute_hours.
+  const d = (res.data || {}) as any;
+  const billedUsd =
+    typeof d.billed_usd === "number" ? d.billed_usd : (d.billed_cents || 0) / 100;
+  const computeHours =
+    d.compute_hours != null
+      ? d.compute_hours
+      : d.used_minutes != null
+        ? Number((d.used_minutes / 60).toFixed(2))
+        : null;
+
+  return toolText(
+    [
+      `Metered session settled:`,
+      ``,
+      `Booking ID: ${d.booking_id || args.booking_id}`,
+      `Compute hours used: ${computeHours ?? "—"}${d.used_minutes != null ? ` (${d.used_minutes} min)` : ""}`,
+      `Settled cost: $${Number(billedUsd).toFixed(2)}`,
+      `The per-minute meter has stopped; the unused portion of the authorized budget has been released.`,
+    ].join("\n"),
   );
 }
 

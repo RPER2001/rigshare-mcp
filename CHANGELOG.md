@@ -5,6 +5,59 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-09
+
+### Fixed
+- **`rigshare_create_listing` could not publish ANY remote-access (Tech)
+  listing.** The backend hard-rejects a remote create without `security_ack`,
+  but the tool never sent it — every GPU/robot/compute listing failed with an
+  opaque 400. Added `security_ack` to the `remote_access` input (documented as
+  REQUIRED when `remote_access` is provided), threaded it into the create body,
+  and added a pre-flight check that returns a clear, actionable error before the
+  fetch when it isn't `true`.
+- **`rigshare_get_owner_onboarding` described the retired verify-first flow.**
+  Rewrote the "How to list" steps to production's **draft-first** order: sign
+  up → start the listing immediately (no verification needed to DRAFT) → at
+  Publish, RIGShare walks you through one-time identity + Stripe Connect setup
+  just-in-time → go live. Kept the note that the direct `rigshare_create_listing`
+  API path publishes immediately (no draft step), so identity + Connect must be
+  done once on the web first for that path.
+- **Onboarding pricing copy corrected.** The renter service fee is now "up to
+  7% (reduced to 3% for verified students)"; the deposit line clarifies the 15%
+  authorization hold (minimum $100) applies to physical/FIXED rentals only —
+  METERED per-minute Tech sessions have NO deposit (the renter authorizes a
+  usage budget instead).
+- **Search pagination no longer silently drops rows.** The tool advertised a
+  limit up to 100 and forwarded it, then sliced the output to 10 and reported
+  "N more omitted" — but those rows were unreachable (bumping `page` skips
+  them). It now renders every row the page returned; the caller's `limit`
+  decides how many come back.
+- **Top-level tool errors no longer leak internals.** The CallTool catch echoed
+  raw `err.message` to the model/user; it now logs the full detail to stderr
+  and returns a generic message.
+
+### Added
+- **`rigshare_end_session`** — ends the METERED (per-minute) billing clock a
+  `rigshare_start_session` started, settling the charge for EXACT usage
+  server-side and releasing the unused budget (sessions:write scope). Closes
+  the money-safety gap: search → book (budget) → start session → **end session
+  (settle)**. Backed by a new agent endpoint,
+  `POST /api/v1/agent/bookings/[id]/end`, which authorizes the caller and routes
+  through the shared `endMeteredBookingForUser` core (client amounts ignored).
+- **`compute_architecture` search filter** (`CUDA` / `ROCM` / `APPLE_SILICON` /
+  `TPU` / `TRAINIUM` / `CPU`) on `rigshare_search_equipment` — forwarded to the
+  public browse API and surfaced in each result row. Lets agents find AI compute
+  a workload can actually run on.
+- Search results now show the `four_hour` ($X/4hr) and `monthly` ($X/mo) rates
+  in addition to hourly/daily/weekly.
+
+### Changed
+- **Robust base-URL derivation.** All API bases now derive from a single
+  `RIGSHARE_BASE` (default `https://www.rigshare.app`) instead of a fragile
+  `.replace(/\/agent\/?$/, "")` on the agent base. Existing `RIGSHARE_API_BASE`
+  / `RIGSHARE_AGENT_API_BASE` overrides still win (back-compat), and a new
+  optional `RIGSHARE_V1_API_BASE` override is honored.
+
 ## [1.3.0] - 2026-06-10
 
 ### Added
