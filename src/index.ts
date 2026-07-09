@@ -68,7 +68,7 @@ const RIGSHARE_V1_API =
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 
 const server = new Server(
@@ -268,10 +268,85 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "rigshare_quote_booking",
+      description: [
+        "REQUIRES API KEY (bookings:read scope). DRY-RUN price quote — computes the",
+        "EXACT cost a rigshare_create_booking would charge, but creates nothing and",
+        "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
+        "the renter the full breakdown and get their consent before any money",
+        "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
+        "server-side), the security-deposit authorization hold (15%, min $100 — 0",
+        "for METERED), delivery, coverage/egress, and the grand total, all in cents",
+        "plus formatted USD. Prices are recomputed server-side from the equipment's",
+        "canonical rates and the renter's tier — identical to what booking charges;",
+        "no client price is trusted. METERED (per-minute Tech) listings return the",
+        "per-hour rate, the minimum session budget, and budget presets instead of a",
+        "fixed total (no deposit). Sales tax is added at checkout and not included",
+        "in the estimate. Same inputs as rigshare_create_booking minus",
+        "idempotency_key.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["equipment_id", "start_date", "end_date", "duration_type"],
+        properties: {
+          equipment_id: {
+            type: "string",
+            format: "uuid",
+            description:
+              "From rigshare_search_equipment or rigshare_get_equipment.",
+          },
+          start_date: {
+            type: "string",
+            format: "date-time",
+            description: "ISO-8601 start datetime.",
+          },
+          end_date: {
+            type: "string",
+            format: "date-time",
+            description: "ISO-8601 end datetime. Must be after start_date.",
+          },
+          duration_type: {
+            type: "string",
+            enum: ["HOURLY", "FOUR_HOURS", "DAILY", "WEEKLY", "MONTHLY"],
+            description:
+              "Determines which rate is used. Must match a rate the equipment actually offers.",
+          },
+          pickup_type: {
+            type: "string",
+            enum: ["SELF_PICKUP", "OWNER_DELIVERY", "REMOTE_ACCESS"],
+            default: "REMOTE_ACCESS",
+            description:
+              "Affects the delivery line. Default REMOTE_ACCESS for robotics/AI; use SELF_PICKUP or OWNER_DELIVERY for construction equipment.",
+          },
+          budget_usd: {
+            type: "number",
+            minimum: 0.5,
+            maximum: 25000,
+            description:
+              "Ignored for the quote (METERED quotes return the minimum budget + presets to choose from). Accepted for input-shape parity with rigshare_create_booking.",
+          },
+          coverage_path: {
+            type: "string",
+            enum: ["WAIVER", "BYOCOI"],
+            description:
+              "Accepted for parity with rigshare_create_booking; does not change the quoted price.",
+          },
+          waiver_version: { type: "string", maxLength: 50 },
+          qualification_answers: {
+            type: "object",
+            additionalProperties: { type: "string", maxLength: 500 },
+          },
+          qualification_version: { type: "string", maxLength: 50 },
+        },
+      },
+    },
+    {
       name: "rigshare_create_booking",
       description: [
         "REQUIRES API KEY (bookings:write scope). Creates a new RIGShare booking",
-        "for the authenticated user. Server computes all prices from the",
+        "for the authenticated user. Call rigshare_quote_booking FIRST to preview",
+        "the exact cost (dry-run, nothing charged) and confirm it with the renter",
+        "before committing money here. Server computes all prices from the",
         "equipment's canonical rates — client-side price hints are ignored.",
         "Enforces identity verification, security deposit hold, and the",
         "daily/monthly budget cap configured on the API key.",
@@ -467,6 +542,100 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "rigshare_check_availability",
+      description: [
+        "REQUIRES API KEY (equipment:read scope). Returns the unavailability",
+        "windows (blocked date ranges) RIGShare holds for one of YOUR listings,",
+        "identified by its external_id — the inventory/SKU id you listed it under",
+        "(via rigshare_create_listing's external_id). Use this to reconcile your",
+        "ERP/fleet calendar with RIGShare, or to check whether a date range is",
+        "open before pushing new blocks with rigshare_sync_availability. If you",
+        "pass starts_at + ends_at, the tool also reports whether that specific",
+        "range overlaps a blocked window. NOTE: the endpoint keys ONLY on",
+        "external_id (an owner-scoped lookup) — it does not accept an equipment",
+        "UUID, and the windows returned are availability blocks, not renter",
+        "bookings.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["external_id"],
+        properties: {
+          external_id: {
+            type: "string",
+            maxLength: 120,
+            description:
+              "The inventory/SKU id you listed the equipment under (rigshare_create_listing's external_id). Owner-scoped to your account.",
+          },
+          starts_at: {
+            type: "string",
+            format: "date-time",
+            description:
+              "Optional. If provided with ends_at, the tool reports whether this range is free of blocked windows.",
+          },
+          ends_at: {
+            type: "string",
+            format: "date-time",
+            description: "Optional. See starts_at.",
+          },
+        },
+      },
+    },
+    {
+      name: "rigshare_sync_availability",
+      description: [
+        "REQUIRES API KEY (equipment:write scope). Pushes your ERP/fleet calendar",
+        "to RIGShare: marks date ranges UNAVAILABLE on one of your listings so no",
+        "new RIGShare booking can be created during them. The listing is",
+        "identified by external_id (the inventory/SKU id from",
+        "rigshare_create_listing). SNAPSHOT semantics: the blocks you send REPLACE",
+        "all previously-synced blocks for that external_id (pass an empty blocks",
+        "array to clear them). Windows that overlap a CONFIRMED RIGShare booking",
+        "are rejected and reported back (you can't retroactively block a day a",
+        "renter already paid for). Owner-created blocks set in the RIGShare UI are",
+        "left untouched. Returns the applied count + any conflicts.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        required: ["external_id", "blocks"],
+        properties: {
+          external_id: {
+            type: "string",
+            maxLength: 120,
+            description:
+              "The inventory/SKU id of a listing you own (rigshare_create_listing's external_id).",
+          },
+          blocks: {
+            type: "array",
+            maxItems: 365,
+            description:
+              "Snapshot of unavailability windows. REPLACES all previously-synced blocks for this external_id (pass [] to clear).",
+            items: {
+              type: "object",
+              required: ["starts_at", "ends_at"],
+              properties: {
+                starts_at: {
+                  type: "string",
+                  format: "date-time",
+                  description: "ISO-8601 start of the blocked window.",
+                },
+                ends_at: {
+                  type: "string",
+                  format: "date-time",
+                  description: "ISO-8601 end. Must be after starts_at.",
+                },
+                reason: {
+                  type: "string",
+                  maxLength: 200,
+                  description:
+                    "Optional label (e.g. 'Rented in our ERP', 'Maintenance').",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    {
       name: "rigshare_start_session",
       description: [
         "REQUIRES API KEY (sessions:write scope). Starts a remote session on a",
@@ -537,10 +706,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await listMyBookings(args || {});
       case "rigshare_list_my_sessions":
         return await listMySessions(args || {});
+      case "rigshare_quote_booking":
+        return await quoteBooking(args || {});
       case "rigshare_create_booking":
         return await createBooking(args || {});
       case "rigshare_create_listing":
         return await createListing(args || {});
+      case "rigshare_check_availability":
+        return await checkAvailability(args || {});
+      case "rigshare_sync_availability":
+        return await syncAvailability(args || {});
       case "rigshare_start_session":
         return await startSession(args || {});
       case "rigshare_end_session":
@@ -976,6 +1151,106 @@ async function listMySessions(args: Record<string, unknown>) {
   return toolText(`Your remote sessions:\n\n${lines.join("\n\n")}`);
 }
 
+/**
+ * DRY-RUN price quote. Same inputs as createBooking (minus idempotency_key);
+ * POSTs to the /quote endpoint, which recomputes the breakdown server-side via
+ * the SAME core createBooking uses and STOPS before creating/charging anything.
+ * Renders the readable breakdown so an agent can confirm cost with the renter
+ * before committing money. No client price is sent or trusted.
+ */
+async function quoteBooking(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  // Same minimal client-side validation as createBooking.
+  if (!args.equipment_id || typeof args.equipment_id !== "string") {
+    return toolError("equipment_id is required (uuid)");
+  }
+  if (!args.start_date || typeof args.start_date !== "string") {
+    return toolError("start_date is required (ISO-8601)");
+  }
+  if (!args.end_date || typeof args.end_date !== "string") {
+    return toolError("end_date is required (ISO-8601)");
+  }
+  if (!args.duration_type) {
+    return toolError(
+      "duration_type is required (HOURLY | FOUR_HOURS | DAILY | WEEKLY | MONTHLY)",
+    );
+  }
+
+  const body: Record<string, unknown> = {
+    equipment_id: args.equipment_id,
+    start_date: args.start_date,
+    end_date: args.end_date,
+    duration_type: args.duration_type,
+    pickup_type: args.pickup_type || "REMOTE_ACCESS",
+  };
+  // Passthrough for input-shape parity with createBooking. None of these change
+  // the quoted price (the server recomputes from canonical rates + tier), but
+  // forwarding them keeps the quote request identical to what a booking submits.
+  if (typeof args.budget_usd === "number") {
+    body.meter_budget_cents = Math.round(args.budget_usd * 100);
+  }
+  if (args.coverage_path) body.coverage_path = args.coverage_path;
+  if (args.waiver_version) body.waiver_version = args.waiver_version;
+  if (args.qualification_answers) body.qualification_answers = args.qualification_answers;
+  if (args.qualification_version) body.qualification_version = args.qualification_version;
+
+  const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_AGENT_API}/quote`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (res.error) return toolError(res.error);
+
+  const d = (res.data || {}) as any;
+  const dollars = (cents: number) => `$${((cents || 0) / 100).toFixed(2)}`;
+
+  // METERED (per-minute) listings quote a budget shape, not a fixed total.
+  if (d.billing_mode === "METERED") {
+    const presets = Array.isArray(d.presets) ? d.presets : [];
+    const presetLines = presets.map(
+      (p: any) =>
+        `   ${p.hours}h of usage ≈ ${p.budget_usd || dollars(p.budget_cents)}`,
+    );
+    return toolText(
+      [
+        `Booking quote (METERED — billed per minute):`,
+        ``,
+        `Rate: ${d.rate_hourly_usd || dollars(d.rate_hourly_cents)}/hr`,
+        `Minimum session budget: ${d.min_budget_usd || dollars(d.min_budget_cents)}`,
+        `Security deposit: $0.00 (metered sessions have no deposit)`,
+        presetLines.length ? `\nBudget presets:\n${presetLines.join("\n")}` : "",
+        ``,
+        d.disclaimer ||
+          "This is an estimate; nothing is charged. You authorize a budget and pay only for the minutes actually used.",
+        ``,
+        `To book, call rigshare_create_booking with budget_usd set to your authorized session spend.`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+
+  // FIXED listing: full pre-tax breakdown (server-computed).
+  const f = d.formatted || {};
+  const lines = [
+    `Booking quote (estimate — nothing is charged):`,
+    ``,
+    `Rental (${d.rental_days ?? "?"} day${d.rental_days === 1 ? "" : "s"}): ${f.rental_subtotal || dollars(d.rental_subtotal_cents)}`,
+    (d.delivery_fee_cents || 0) > 0 ? `Delivery: ${f.delivery_fee || dollars(d.delivery_fee_cents)}` : null,
+    `Renter service fee: ${f.service_fee || dollars(d.service_fee_cents)}`,
+    (d.basic_insurance_cents || 0) > 0 ? `Basic coverage: ${f.basic_insurance || dollars(d.basic_insurance_cents)}` : null,
+    (d.estimated_egress_cents || 0) > 0 ? `Estimated network egress: ${f.estimated_egress || dollars(d.estimated_egress_cents)}` : null,
+    `Charged now (pre-tax): ${f.charged_now || dollars(d.charged_subtotal_cents)}`,
+    `Security deposit (refundable authorization hold): ${f.security_deposit || dollars(d.security_deposit_cents)}`,
+    `Grand total incl. deposit hold: ${f.total_amount || dollars(d.total_amount_cents)}`,
+    ``,
+    d.tax?.note || "Sales tax is calculated at checkout and not included in this estimate.",
+    ``,
+    d.disclaimer || "This is an estimate; nothing is charged. Book with rigshare_create_booking.",
+  ].filter((l) => l !== null);
+  return toolText(lines.join("\n"));
+}
+
 async function createBooking(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
 
@@ -1157,6 +1432,152 @@ async function createListing(args: Record<string, unknown>) {
       `Live at: ${listingUrl}`,
       `Manage at: https://www.rigshare.app/dashboard`,
     ].join("\n"),
+  );
+}
+
+/**
+ * Read the unavailability windows RIGShare holds for one of the caller's own
+ * listings, keyed by external_id (the GET only supports this key form, and the
+ * lookup is scoped to the API key's owner). Optionally reports whether a
+ * requested date range overlaps a blocked window.
+ */
+async function checkAvailability(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  const externalId =
+    typeof args.external_id === "string" ? args.external_id.trim() : "";
+  if (!externalId) {
+    return toolError(
+      "external_id is required — the inventory/SKU id you listed the equipment under (rigshare_create_listing's external_id). The availability endpoint keys only on external_id, not a RIGShare equipment UUID.",
+    );
+  }
+
+  const params = new URLSearchParams();
+  params.set("external_id", externalId);
+  const res = await fetchAuthJson(
+    RIGSHARE_API_KEY,
+    `${RIGSHARE_V1_API}/availability?${params.toString()}`,
+  );
+  if (res.status === 404) {
+    return toolError(
+      `No equipment found with external_id=${externalId} under your account. List it first (rigshare_create_listing with external_id) or check the id.`,
+    );
+  }
+  if (res.error) return toolError(res.error);
+
+  const d = (res.data || {}) as any;
+  const blocks = (d.blocks || []) as any[];
+  const blocked = blocks.filter((b) => b.is_blocked);
+
+  const blockLines =
+    blocked.length === 0
+      ? ["No unavailability windows — the listing is fully open on RIGShare's calendar."]
+      : blocked.map((b, i) => {
+          const start = new Date(b.starts_at);
+          const end = new Date(b.ends_at);
+          return `${i + 1}. ${start.toLocaleDateString()} → ${end.toLocaleDateString()}${b.reason ? ` — ${b.reason}` : ""}`;
+        });
+
+  // Optional requested-range check: does [starts_at, ends_at) overlap any
+  // blocked window? Half-open overlap: block.start < reqEnd && block.end > reqStart.
+  let rangeNote = "";
+  const reqStart =
+    typeof args.starts_at === "string" ? new Date(args.starts_at) : null;
+  const reqEnd = typeof args.ends_at === "string" ? new Date(args.ends_at) : null;
+  if (
+    reqStart &&
+    reqEnd &&
+    !isNaN(reqStart.getTime()) &&
+    !isNaN(reqEnd.getTime())
+  ) {
+    const overlaps = blocked.some(
+      (b) =>
+        new Date(b.starts_at).getTime() < reqEnd.getTime() &&
+        new Date(b.ends_at).getTime() > reqStart.getTime(),
+    );
+    rangeNote = overlaps
+      ? `\nRequested range ${reqStart.toLocaleDateString()} → ${reqEnd.toLocaleDateString()}: OVERLAPS a blocked window — NOT available.`
+      : `\nRequested range ${reqStart.toLocaleDateString()} → ${reqEnd.toLocaleDateString()}: free of blocked windows (subject to any existing renter bookings, which aren't listed here).`;
+  }
+
+  return toolText(
+    [
+      `Availability for external_id=${d.external_id} (equipment ${d.equipment_id}):`,
+      ``,
+      ...blockLines,
+      rangeNote,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+}
+
+/**
+ * Push an ERP/fleet calendar to RIGShare for one listing (snapshot-replace of
+ * the external-sync blocks, keyed by external_id). Windows overlapping a
+ * confirmed RIGShare booking are rejected and surfaced back to the caller.
+ */
+async function syncAvailability(args: Record<string, unknown>) {
+  if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
+
+  const externalId =
+    typeof args.external_id === "string" ? args.external_id.trim() : "";
+  if (!externalId) {
+    return toolError(
+      "external_id is required — the inventory/SKU id of the listing whose calendar you're syncing (rigshare_create_listing's external_id).",
+    );
+  }
+  if (!Array.isArray(args.blocks)) {
+    return toolError(
+      "blocks is required — an array of { starts_at, ends_at, reason? } unavailability windows (pass [] to clear all synced blocks).",
+    );
+  }
+
+  const blocks = (args.blocks as any[]).map((b) => ({
+    starts_at: b?.starts_at,
+    ends_at: b?.ends_at,
+    ...(b?.reason ? { reason: b.reason } : {}),
+  }));
+
+  const res = await fetchAuthJson(RIGSHARE_API_KEY, `${RIGSHARE_V1_API}/availability`, {
+    method: "POST",
+    body: JSON.stringify({ items: [{ external_id: externalId, blocks }] }),
+  });
+  if (res.error) return toolError(res.error);
+
+  const d = (res.data || {}) as any;
+  const summary = d.summary || {};
+  const result = (Array.isArray(d.results) && d.results[0]) || {};
+
+  // The route reports per-item status; surface not_found as an actionable error.
+  if (result.status === "not_found") {
+    return toolError(
+      result.error ||
+        `No equipment found with external_id=${externalId} under your account. Create it first via rigshare_create_listing (with external_id).`,
+    );
+  }
+
+  const conflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
+  const conflictLines = conflicts.map((c: any, i: number) => {
+    const start = new Date(c.starts_at);
+    const end = new Date(c.ends_at);
+    return `   ${i + 1}. ${start.toLocaleDateString()} → ${end.toLocaleDateString()}${c.reason ? ` — ${c.reason}` : ""}`;
+  });
+
+  return toolText(
+    [
+      `Availability synced for external_id=${externalId}:`,
+      ``,
+      `Status: ${result.status || "synced"}`,
+      result.equipment_id ? `Equipment: ${result.equipment_id}` : null,
+      `Blocks applied: ${result.blocks_created ?? summary.blocks_created ?? 0}`,
+      `Conflicts (skipped — a confirmed RIGShare booking already exists): ${result.blocks_conflicting ?? summary.conflicts ?? 0}`,
+      conflictLines.length ? `\nConflicting windows (not blocked):\n${conflictLines.join("\n")}` : "",
+      ``,
+      `Snapshot semantics: these blocks REPLACED the previously-synced set for this external_id.`,
+    ]
+      .filter(Boolean)
+      .join("\n"),
   );
 }
 

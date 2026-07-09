@@ -5,6 +5,38 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-09
+
+### Added
+- **`rigshare_quote_booking`** — DRY-RUN price quote (bookings:read scope). Makes
+  agent-driven booking SAFE: it computes the EXACT cost a `rigshare_create_booking`
+  would charge — rental subtotal, renter service fee (student 3% vs 7% resolved
+  server-side), the 15%/min-$100 security-deposit hold (0 for METERED), delivery,
+  coverage/egress, and grand total (cents + formatted USD) — but creates and
+  charges NOTHING. Previously the only pricing path was `rigshare_create_booking`,
+  which charges, so an agent booked blind; now it can preview and confirm the cost
+  with the renter first. METERED (per-minute Tech) listings return the per-hour
+  rate, minimum session budget, and budget presets instead of a fixed total (no
+  deposit). Backed by a NEW endpoint, `POST /api/v1/agent/quote`, which runs the
+  SAME validation and the SAME server-side computation as the create route
+  (`resolveEffectiveCommission` → `computeRentalQuote`) and stops before creating
+  the booking. No client price is ever sent or trusted. `rigshare_create_booking`'s
+  description now recommends quoting first.
+- **`rigshare_check_availability`** — reads the unavailability windows (blocked
+  date ranges) RIGShare holds for one of your listings, keyed by its `external_id`
+  (equipment:read scope). Optionally reports whether a requested `starts_at` →
+  `ends_at` range overlaps a blocked window. Backed by the existing
+  `GET /api/v1/availability` (no app change); the endpoint keys only on
+  `external_id` (an owner-scoped lookup), so the tool matches that exactly.
+- **`rigshare_sync_availability`** — pushes an ERP/fleet calendar to RIGShare
+  (equipment:write scope): marks date ranges UNAVAILABLE on a listing so no new
+  RIGShare booking can be created during them, identified by `external_id`.
+  Snapshot semantics — the blocks sent REPLACE the previously-synced set (pass
+  `[]` to clear); windows overlapping a CONFIRMED booking are rejected and
+  reported. Serves fleet/ERP owners who listed via `rigshare_create_listing`
+  (external_id). Backed by the existing `POST /api/v1/availability` (no app
+  change).
+
 ## [1.4.0] - 2026-07-09
 
 ### Fixed
