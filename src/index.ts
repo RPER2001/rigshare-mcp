@@ -125,8 +125,71 @@ const BUNDLED_POLICY = {
     enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
   },
   listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
-  security_deposit: { rate: 0.15, min_cents: 10000, min_usd: 100, metered: false },
+  // `rate` is the flat STANDARD/default tier (backward compat). `tiers` is the
+  // owner-selectable set (Stage E2); the live /policy payload provides the same
+  // shape, and this bundled copy is the graceful fallback when it's unreachable.
+  security_deposit: {
+    rate: 0.15,
+    min_cents: 10000,
+    min_usd: 100,
+    metered: false,
+    owner_selectable: true,
+    tiers: [
+      { id: "NONE", label: "None", rate: 0 },
+      { id: "STANDARD_15", label: "Standard", rate: 0.15 },
+      { id: "HIGHER_25", label: "Higher", rate: 0.25 },
+    ],
+  },
+  // Damage-claim + referral facts (additive, mirrors the live /policy payload's
+  // `damage_claims` / `claim_settlement` / `referral_program` keys) so a caller
+  // still gets accurate copy even when the live endpoint is unreachable.
+  damage_claims: {
+    ai_never_charges_alone: true,
+    owner_review_required: true,
+    cap: "security_deposit",
+    sanity_ceiling_usd: 100_000,
+    owner_review_deadline_hours: 168,
+    renter_response_window_hours: 72,
+    renter_response_window_note:
+      "An explicit accept always starts collection. On silence, collection starts only if RIGShare's AI plausibility check clears the owner-approved amount as proportionate to the photos and deposit; an anomalous, unverifiable, or unchecked claim is routed to direct_resolution instead of being charged.",
+    environmental_grime_excluded: true,
+    collection: { max_attempts: 3, window_days: 14 },
+    direct_resolution: {
+      description:
+        "If the approved amount cannot be collected, or a silent claim was not cleared by the plausibility check, RIGShare shares contact info and the evidence between owner and renter, opens a message thread, and stops charging. RIGShare facilitates the transaction and does not adjudicate the claim.",
+      on_platform_settlement_available: true,
+    },
+    renter_booking_gate: {
+      block_outstanding_usd: 2_500,
+      block_claim_count: 3,
+      note:
+        "A claim the renter never responded to AND that the AI never cleared as plausible does not count toward this gate.",
+    },
+  },
+  claim_settlement: {
+    available: true,
+    optional: true,
+    methods: ["card", "afterpay_clearpay", "klarna", "affirm", "zip"],
+    partial_payments_allowed: true,
+    auto_resolves_on_full_payment: true,
+    renter_pays_processing_fee: true,
+    owner_receives_full_balance: true,
+    fee_disclosure: "itemized before the renter pays",
+  },
+  referral_program: {
+    referrer_reward_usd: 50,
+    referee_reward_usd: 25,
+    qualifying_event: "referred user completes a qualifying rental",
+    credit_use: "applied automatically at a future checkout; never applies to the security deposit",
+    clawback_on_refund_or_chargeback: true,
+    abuse_policy: "self-referral and referral farming are prohibited",
+    pages: {
+      construction: "https://www.rigshare.app/referrals",
+      robotics_ai: "https://www.rigshare.app/robotics-ai/referrals",
+    },
+  },
 } as const;
+type DepositTier = { id: string; label: string; rate: number };
 type NormalizedPolicy = {
   version: string;
   commission: { free: number; pro: number; enterprise: number; student: number };
@@ -136,7 +199,16 @@ type NormalizedPolicy = {
     enterprise: { monthly_cents: number; yearly_cents: number };
   };
   listing_caps: { free: number; pro: number; enterprise: number; student: number };
-  security_deposit: { rate: number; min_cents: number; min_usd: number; metered: boolean };
+  // `owner_selectable` + `tiers` are additive (Stage E2) — optional so a live
+  // payload that predates them still normalizes cleanly and falls back to `rate`.
+  security_deposit: {
+    rate: number;
+    min_cents: number;
+    min_usd: number;
+    metered: boolean;
+    owner_selectable?: boolean;
+    tiers?: DepositTier[];
+  };
 };
 
 // Shape of every tool's return payload (a single text block, optionally an
@@ -448,8 +520,10 @@ registerRigTool(
       "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
       "the renter the full breakdown and get their consent before any money",
       "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
-      "server-side), the security-deposit authorization hold (15%, min $100 — 0",
-      "for METERED), delivery, coverage/egress, and the grand total, all in cents",
+      "server-side), the security-deposit authorization hold (owner-set per",
+      "listing: 0% None, 15% Standard, or 25% Higher of rental total, min $100",
+      "when a deposit applies; 0 for METERED), delivery, coverage/egress, and the",
+      "grand total, all in cents",
       "plus formatted USD. Prices are recomputed server-side from the equipment's",
       "canonical rates and the renter's tier — identical to what booking charges;",
       "no client price is trusted. METERED (per-minute Tech) listings return the",
@@ -713,7 +787,10 @@ registerRigTool(
       "7+ days 100% / 3-6 days 75% / 1-2 days 50% / same-day 0%, with a 25%",
       "high-value exception on >$5k multi-day rentals; Tech remote-access:",
       "before-session 100% / within first hour 75% / after 0%). The 7% renter",
-      "service fee is non-refundable on renter cancellations. The client CANNOT",
+      "service fee is non-refundable on renter cancellations, EXCEPT the share of",
+      "it charged on an owner delivery fee that is itself being refunded: a",
+      "booking that ends before pickup is confirmed returns the delivery fee in",
+      "full and the service fee charged on it with it. The client CANNOT",
       "dictate the refund amount or reason code — pass only the booking id. The",
       "security-deposit authorization hold is released (never captured). Safe on",
       "terminal state: cancelling an already-cancelled/completed/disputed booking",
@@ -1328,9 +1405,9 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
     sections.push(
       "## Why RIGShare for Robotics & AI hardware",
       "",
-      "The Robotics & AI division is purpose-built for remote-access rentals. Your hardware never ships — renters connect over the network and you keep the gear on your rack.",
+      "The Robotics & AI division supports remote-access rentals for AI compute, AI infrastructure, and IoT sensors: that hardware never ships — renters connect over the network and you keep the gear on your rack. Humanoid robots, industrial robots, drones, and 3D printers are PHYSICAL rentals on RIGShare — renters pick them up or you deliver them, and remote operation is not offered for machines that move.",
       "",
-      "- **Four remote-access modes per listing**: SSH terminal, Jupyter notebook, VNC desktop, or plain HTTP API proxying",
+      "- **Four remote-access modes** on a remote-eligible listing (AI compute, AI infrastructure, IoT sensors): SSH terminal, Jupyter notebook, VNC desktop, or plain HTTP API proxying",
       "- **AES-256-GCM encrypted** credential + endpoint storage — plaintext API keys never stored",
       "- **Per-equipment MFA (TOTP)** enforcement for sensitive hardware — prevents stolen-token attacks",
       "- **Session audit logs** (immutable SessionEvent records) for compliance/disputes",
@@ -1339,7 +1416,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
       "- **Per-session concurrency caps** you set — one renter at a time, or many",
       "- **Allowed-IP restrictions** + session duration caps configurable per listing",
       "",
-      "Typical rentable categories: GPU compute (H100 / A100 / RTX 5090 / L40S / MI300), AI infrastructure, humanoid robots (Unitree / Figure-class), industrial arms, drones, 3D printers (FDM / SLA / SLS), IoT sensor rigs.",
+      "Typical rentable categories — remote-access eligible: GPU compute (H100 / A100 / RTX 5090 / L40S / MI300), AI infrastructure, IoT sensor rigs. Physical-only: humanoid robots (Unitree / Figure-class), industrial arms, drones, 3D printers (FDM / SLA / SLS).",
       "",
     );
   } else if (looksConstruction) {
@@ -1363,7 +1440,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
       "## Two divisions",
       "",
       "- **Construction** — excavators, lifts, generators, concrete tools, etc. Physical handoff. GPS tracking + insurance verification + QR handoff.",
-      "- **Robotics & AI** — GPU compute, humanoid robots, drones, 3D printers, IoT sensors. Remote access via SSH/Jupyter/VNC/API. Equipment never ships.",
+      "- **Robotics & AI** — GPU compute, AI infrastructure, and IoT sensors rent with remote access via SSH/Jupyter/VNC/API and never ship. Humanoid robots, industrial robots, drones, and 3D printers are physical-only: in-person pickup or owner delivery, no remote operation.",
       "",
     );
   }
@@ -1377,7 +1454,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
       ? "1. Sign up at **https://www.rigshare.app/robotics-ai/register** (or log in if you already have an account)."
       : "1. Sign up at **https://www.rigshare.app/signup** (or log in if you already have an account).",
     looksRoboticsAi
-      ? "2. Start your listing right away at **https://www.rigshare.app/robotics-ai/list** — no verification needed to DRAFT: add your title, rates, photos, and specs. For remote-access gear, configure your endpoint URL (HTTPS required) + optional API key; RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
+      ? "2. Start your listing right away at **https://www.rigshare.app/robotics-ai/list** — no verification needed to DRAFT: add your title, rates, photos, and specs. For remote-access-eligible gear (AI compute, AI infrastructure, IoT sensors), configure your endpoint URL (HTTPS required) + optional API key; RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
       : "2. Start your listing right away at **https://www.rigshare.app/list-equipment** — no verification needed to DRAFT: add your title, hourly/daily/weekly/monthly rates, photos (front, sides, back; 5 required for engine-based categories), and specs. Set availability and delivery radius.",
     "3. When you hit **Publish**, RIGShare walks you through the one-time setup just-in-time: identity verification (Stripe Identity, ~3 min) and Stripe Connect payout onboarding (~5 min). You only do this once.",
     "4. Publish — your listing goes live, renters can book immediately, and you get a notification on each booking.",
@@ -1389,7 +1466,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
     "- Manage bookings + approvals at https://www.rigshare.app/dashboard",
     "- Messages with renters in-app (never on personal phones)",
     "- Payouts arrive 48h after each rental completes (Stripe Connect)",
-    "- If damage is reported on return, the 15% security deposit covers most cases; the dispute flow is AI-assisted and human-reviewed",
+    "- If damage is reported on return, the security deposit (owner-selectable per listing: 0% None, 15% Standard, or 25% Higher of rental total, min $100 when a deposit applies) covers most cases; the dispute flow is AI-assisted and human-reviewed",
     "",
     "## Questions",
     "",
@@ -2348,6 +2425,17 @@ function usdFromCents(cents: number): string {
 function capLabel(n: number): string {
   return n === -1 || n == null ? "Unlimited" : `${n} listing${n === 1 ? "" : "s"}`;
 }
+/**
+ * Render the owner-selectable deposit tiers (Stage E2) as "None 0% / Standard
+ * 15% / Higher 25%". Falls back to the flat `rate` if a policy payload predates
+ * the `tiers` field (backward compatible).
+ */
+function depositTierLabel(dep: NormalizedPolicy["security_deposit"]): string {
+  if (dep.tiers && dep.tiers.length) {
+    return dep.tiers.map((t) => `${t.label} ${pctLabel(t.rate)}`).join(" / ");
+  }
+  return pctLabel(dep.rate);
+}
 
 /**
  * Render the "## Economics" block from the canonical policy. Reproduces the
@@ -2370,8 +2458,8 @@ function renderEconomics(policy: NormalizedPolicy): string[] {
     `| Pro | ${usdFromCents(sp.pro.monthly_cents)} | ${pctLabel(c.pro)} | ${capLabel(caps.pro)} |`,
     `| Enterprise | ${usdFromCents(sp.enterprise.monthly_cents)} | ${pctLabel(c.enterprise)} | ${capLabel(caps.enterprise)} |`,
     "",
-    `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total (reduced to ${pctLabel(fee.student)} for verified students) — doesn't reduce your payout`,
-    `- ${pctLabel(dep.rate)} security-deposit authorization hold (minimum $${dep.min_usd}) on physical/FIXED rentals, released within 48h of clean return — protects you against damage. METERED per-minute Tech sessions have NO deposit — the renter authorizes a usage budget instead`,
+    `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total (reduced to ${pctLabel(fee.student)} for verified students); doesn't reduce your payout`,
+    `- Security deposit is owner-selectable per listing (${depositTierLabel(dep)} of rental total, minimum $${dep.min_usd} when a deposit applies) on physical/FIXED rentals, placed as an authorization hold and released within 48h of clean return. METERED per-minute Tech sessions have NO deposit; the renter authorizes a usage budget instead`,
     "- Payouts via Stripe Connect, 48-hour hold after rental completion",
     "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",
     "",
