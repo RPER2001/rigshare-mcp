@@ -111,11 +111,15 @@ type FetchResult = {
 };
 const publicJsonCache = new Map<string, { expires: number; value: FetchResult }>();
 
-// Bundled fallback for the canonical pricing/fee copy. Mirrors the enforced
-// constants (app/_lib/subscriptions.ts + app/_lib/stripe.ts) EXACTLY, so the
-// owner-onboarding tool renders identical copy whether it sourced the live
-// /policy endpoint or fell back here. This is ONLY a fallback — the live path
-// is authoritative and is what keeps copy from drifting after a price change.
+// Bundled fallback for the canonical pricing/fee copy. Mirrors the live
+// /api/public/v1/policy payload (itself sourced from the enforced constants:
+// subscriptions.ts, stripe.ts, deposit-display.ts), so the owner-onboarding
+// tool renders identical copy whether it sourced the live /policy endpoint or
+// fell back here. This is ONLY a fallback — the live path is authoritative and
+// is what keeps copy from drifting after a price change. When the live payload
+// changes shape or values, update this block in the same PR (audit W8: the
+// pre-facilitator deposit tiers sat here for weeks after the model retired
+// them, telling agents deposits were held at 15/25% whenever /policy blipped).
 const BUNDLED_POLICY = {
   version: "bundled",
   commission: { free: 0.15, pro: 0.1, enterprise: 0.07, student: 0.07 },
@@ -125,20 +129,39 @@ const BUNDLED_POLICY = {
     enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
   },
   listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
-  // `rate` is the flat STANDARD/default tier (backward compat). `tiers` is the
-  // owner-selectable set (Stage E2); the live /policy payload provides the same
-  // shape, and this bundled copy is the graceful fallback when it's unreachable.
+  // FACILITATOR MODEL (2026-08-01): RIGShare holds NO deposit on any new
+  // booking. Mirrors the live /policy payload's facilitator block (audit W8 —
+  // the pre-facilitator 15/25% hold tiers sat here months after the model
+  // retired them, and this block genuinely renders whenever the live endpoint
+  // is unreachable). `rate`/`min_cents` are kept as keys (0) for consumers
+  // that predate the model; `tiers` are DORMANT — no tier is applied to any
+  // booking.
   security_deposit: {
-    rate: 0.15,
-    min_cents: 10000,
-    min_usd: 100,
+    held: false,
+    rate: 0,
+    min_cents: 0,
+    min_usd: 0,
     metered: false,
     owner_selectable: true,
+    model: "owner_displayed_not_held",
+    display_field: "deposit_display_cents",
+    max_pct_of_replacement_value: 10,
+    max_cents: 100_000,
+    min_display_cents: 2_500,
+    requires_replacement_value: true,
+    default_tier: "STANDARD_15",
     tiers: [
-      { id: "NONE", label: "None", rate: 0 },
-      { id: "STANDARD_15", label: "Standard", rate: 0.15 },
-      { id: "HIGHER_25", label: "Higher", rate: 0.25 },
+      { id: "NONE", label: "None", rate: 0, dormant: true },
+      { id: "STANDARD_15", label: "Standard", rate: 0, dormant: true },
+      { id: "HIGHER_25", label: "Higher", rate: 0, dormant: true },
     ],
+    note:
+      "RIGShare is a facilitator and holds no deposit funds. The owner states a deposit figure that is " +
+      "displayed on the listing and bounded at 10% of the item's replacement value (floor $25, cap $1,000). " +
+      "It is never authorized or charged on its own. It caps only what RIGShare collects automatically, and " +
+      "RIGShare collects automatically only when the renter explicitly accepts a damage claim. Renter " +
+      "silence never moves money; those claims go to owner-renter direct resolution, where the renter's " +
+      "liability for actual damage remains full and contractual.",
   },
   // Damage-claim + referral facts (additive, mirrors the live /policy payload's
   // `damage_claims` / `claim_settlement` / `referral_program` keys) so a caller
@@ -146,14 +169,14 @@ const BUNDLED_POLICY = {
   damage_claims: {
     ai_never_charges_alone: true,
     owner_review_required: true,
-    cap: "security_deposit",
+    cap: "owner_displayed_deposit_figure",
     sanity_ceiling_usd: 100_000,
     owner_review_deadline_hours: 168,
     renter_response_window_hours: 72,
     renter_response_window_note:
-      "An explicit accept always starts collection. On silence, collection starts only if RIGShare's AI plausibility check clears the owner-approved amount as proportionate to the photos and deposit; an anomalous, unverifiable, or unchecked claim is routed to direct_resolution instead of being charged.",
+      "An explicit accept is the ONLY trigger for collection. On silence RIGShare charges nothing and routes the claim to direct_resolution. An AI plausibility check still runs and is included as evidence in the resolution packet, but it never authorizes a charge.",
     environmental_grime_excluded: true,
-    collection: { max_attempts: 3, window_days: 14 },
+    collection: { max_attempts: 1, window_days: 0, requires_explicit_renter_acceptance: true },
     direct_resolution: {
       description:
         "If the approved amount cannot be collected, or a silent claim was not cleared by the plausibility check, RIGShare shares contact info and the evidence between owner and renter, opens a message thread, and stops charging. RIGShare facilitates the transaction and does not adjudicate the claim.",
@@ -180,7 +203,7 @@ const BUNDLED_POLICY = {
     referrer_reward_usd: 50,
     referee_reward_usd: 25,
     qualifying_event: "referred user completes a qualifying rental",
-    credit_use: "applied automatically at a future checkout; never applies to the security deposit",
+    credit_use: "applied automatically at a future checkout",
     clawback_on_refund_or_chargeback: true,
     abuse_policy: "self-referral and referral farming are prohibited",
     pages: {
@@ -189,7 +212,7 @@ const BUNDLED_POLICY = {
     },
   },
 } as const;
-type DepositTier = { id: string; label: string; rate: number };
+type DepositTier = { id: string; label: string; rate: number; dormant?: boolean };
 type NormalizedPolicy = {
   version: string;
   commission: { free: number; pro: number; enterprise: number; student: number };
@@ -201,6 +224,8 @@ type NormalizedPolicy = {
   listing_caps: { free: number; pro: number; enterprise: number; student: number };
   // `owner_selectable` + `tiers` are additive (Stage E2) — optional so a live
   // payload that predates them still normalizes cleanly and falls back to `rate`.
+  // The facilitator-model keys (held/model/display bounds/note) are optional for
+  // the same reason; the bundled fallback always supplies them.
   security_deposit: {
     rate: number;
     min_cents: number;
@@ -208,6 +233,15 @@ type NormalizedPolicy = {
     metered: boolean;
     owner_selectable?: boolean;
     tiers?: DepositTier[];
+    held?: boolean;
+    model?: string;
+    display_field?: string;
+    max_pct_of_replacement_value?: number;
+    max_cents?: number;
+    min_display_cents?: number;
+    requires_replacement_value?: boolean;
+    default_tier?: string;
+    note?: string;
   };
 };
 
@@ -520,15 +554,17 @@ registerRigTool(
       "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
       "the renter the full breakdown and get their consent before any money",
       "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
-      "server-side), the security-deposit authorization hold (owner-set per",
-      "listing: 0% None, 15% Standard, or 25% Higher of rental total, min $100",
-      "when a deposit applies; 0 for METERED), delivery, coverage/egress, and the",
-      "grand total, all in cents",
-      "plus formatted USD. Prices are recomputed server-side from the equipment's",
-      "canonical rates and the renter's tier — identical to what booking charges;",
-      "no client price is trusted. METERED (per-minute Tech) listings return the",
-      "per-hour rate, the minimum session budget, and budget presets instead of a",
-      "fixed total (no deposit). Sales tax is added at checkout and not included",
+      "server-side), delivery, coverage/egress, and the grand total, all in cents",
+      "plus formatted USD. NO security deposit is held, authorized, or charged on",
+      "any new booking — security_deposit_cents is 0, and deposit_display_cents",
+      "is the owner's DISPLAYED figure only (null = owner stated none, 0 = owner",
+      "requires none): the ceiling RIGShare would charge ONLY if the renter later",
+      "expressly accepts a damage claim; it is never part of the total. Prices",
+      "are recomputed server-side from the equipment's canonical rates and the",
+      "renter's tier — identical to what booking charges; no client price is",
+      "trusted. METERED (per-minute Tech) listings return the per-hour rate, the",
+      "minimum session budget, and budget presets instead of a fixed total (no",
+      "deposit figure either). Sales tax is added at checkout and not included",
       "in the estimate. Same inputs as rigshare_create_booking minus",
       "idempotency_key.",
     ].join(" "),
@@ -562,7 +598,7 @@ registerRigTool(
       "the exact cost (dry-run, nothing charged) and confirm it with the renter",
       "before committing money here. Server computes all prices from the",
       "equipment's canonical rates — client-side price hints are ignored.",
-      "Enforces identity verification, security deposit hold, and the",
+      "Enforces identity verification and the",
       "daily/monthly budget cap configured on the API key.",
       "METERED listings (billing.mode === 'METERED' on the equipment, Tech",
       "remote-access only): bill per minute instead of upfront — you MUST pass",
@@ -791,8 +827,11 @@ registerRigTool(
       "it charged on an owner delivery fee that is itself being refunded: a",
       "booking that ends before pickup is confirmed returns the delivery fee in",
       "full and the service fee charged on it with it. The client CANNOT",
-      "dictate the refund amount or reason code — pass only the booking id. The",
-      "security-deposit authorization hold is released (never captured). Safe on",
+      "dictate the refund amount or reason code — pass only the booking id.",
+      "Bookings made under the current model carry NO deposit hold (RIGShare",
+      "holds none), so there is nothing to release; a LEGACY pre-model booking's",
+      "real historical hold is released, never captured — the returned deposit",
+      "block reports what actually happened (had_hold/disposition). Safe on",
       "terminal state: cancelling an already-cancelled/completed/disputed booking",
       "returns an error, never a double refund. Returns the refund breakdown",
       "(refunded, retained, deposit disposition). For a METERED session prefer",
@@ -1395,7 +1434,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
   sections.push(
     `# List your${equipmentType ? ` ${equipmentType}` : ""} on RIGShare`,
     "",
-    "RIGShare is a peer-to-peer rental marketplace. Owners list idle equipment; renters book by the hour, day, or week. You keep the bulk of every rental — RIGShare handles payments (Stripe), insurance proof, identity verification, and security deposits. You control pricing, availability, and who can rent.",
+    "RIGShare is a peer-to-peer rental marketplace. Owners list idle equipment; renters book by the hour, day, or week. You keep the bulk of every rental — RIGShare handles payments (Stripe), insurance proof, and identity verification. RIGShare does NOT hold security deposits \u2014 you state a deposit figure that is displayed on your listing and only charged if a renter accepts a damage claim. You control pricing, availability, and who can rent.",
     "",
     // Rendered from the canonical /policy copy (falls back to bundled values).
     ...renderEconomics(policy),
@@ -1466,7 +1505,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
     "- Manage bookings + approvals at https://www.rigshare.app/dashboard",
     "- Messages with renters in-app (never on personal phones)",
     "- Payouts arrive 48h after each rental completes (Stripe Connect)",
-    "- If damage is reported on return, the security deposit (owner-selectable per listing: 0% None, 15% Standard, or 25% Higher of rental total, min $100 when a deposit applies) covers most cases; the dispute flow is AI-assisted and human-reviewed",
+    "- If damage is reported on return, the owner reviews it and may approve a charge. RIGShare charges the renter ONLY if the renter expressly accepts it, and never above the deposit figure displayed on the listing. RIGShare holds no deposit funds; renter silence never results in a charge, and the renter remains fully liable to the owner for actual damage.",
     "",
     "## Questions",
     "",
@@ -1674,8 +1713,15 @@ async function quoteBooking(args: Record<string, unknown>) {
     (d.basic_insurance_cents || 0) > 0 ? `Basic coverage: ${f.basic_insurance || dollars(d.basic_insurance_cents)}` : null,
     (d.estimated_egress_cents || 0) > 0 ? `Estimated network egress: ${f.estimated_egress || dollars(d.estimated_egress_cents)}` : null,
     `Charged now (pre-tax): ${f.charged_now || dollars(d.charged_subtotal_cents)}`,
-    `Security deposit (refundable authorization hold): ${f.security_deposit || dollars(d.security_deposit_cents)}`,
-    `Grand total incl. deposit hold: ${f.total_amount || dollars(d.total_amount_cents)}`,
+    // Facilitator model: RIGShare holds no deposit. TRI-STATE — null (owner
+    // states no figure) renders nothing; 0 renders the owner's affirmative
+    // no-deposit statement; >0 the displayed figure. Never coerce null to $0.
+    d.deposit_display_cents == null
+      ? null
+      : d.deposit_display_cents === 0
+        ? `Deposit: none required by this owner`
+        : `Deposit (displayed on the listing — never held; charged only if you expressly accept a damage claim, and never more than this figure): ${f.deposit_display || dollars(d.deposit_display_cents)}`,
+    `Grand total: ${f.total_amount || dollars(d.total_amount_cents)}`,
     ``,
     d.tax?.note || "Sales tax is calculated at checkout and not included in this estimate.",
     ``,
@@ -1726,11 +1772,17 @@ async function createBooking(args: Record<string, unknown>) {
   const moneyLines = isMetered
     ? [
         `Billing: METERED (per minute) — budget authorized: $${((d.meter_budget_cents || d.total_amount || 0) / 100).toFixed(2)}`,
-        `You are only charged for minutes used; no security deposit.`,
+        `You are only charged for minutes used; no deposit is held.`,
       ]
     : [
         `Total: $${((d.total_amount || 0) / 100).toFixed(2)}`,
-        `Security deposit hold: $${((d.security_deposit || 0) / 100).toFixed(2)}`,
+        // TRI-STATE: an absent/null figure must render as "not stated", never
+        // as a fabricated $0.00 — null and 0 are different owner statements.
+        d.deposit_display_cents == null
+          ? `Deposit: this owner has not stated a deposit figure (nothing is held either way)`
+          : d.deposit_display_cents === 0
+            ? `Deposit: none required by this owner`
+            : `Deposit (displayed on the listing — never held; charged only if you expressly accept a damage claim): $${(d.deposit_display_cents / 100).toFixed(2)}`,
       ];
 
   const payment = d.payment || {};
@@ -2088,7 +2140,8 @@ async function endSession(args: Record<string, unknown>) {
  * MONEY PATH — cancel a booking and issue any refund per the cancellation
  * policy. The endpoint computes the refund SERVER-SIDE from the booking's
  * canonical charges (the client sends only the booking id + an optional audit
- * note); it never accepts a client-dictated amount, releases the deposit hold,
+ * note); it never accepts a client-dictated amount (no deposit hold exists to
+ * release \u2014 RIGShare holds none),
  * and is terminal-state-safe (no double refund). We render the returned
  * breakdown so an agent can confirm what was refunded/retained with the renter.
  */
@@ -2125,9 +2178,12 @@ async function cancelBooking(args: Record<string, unknown>) {
     (refund.retained_cents || 0) > 0
       ? `Retained (non-refundable per policy, e.g. service fee): ${usd(refund.retained_usd, refund.retained_cents)}`
       : null,
+    // had_hold means a REAL Stripe authorization existed (a legacy pre-model
+    // booking) — say so honestly; "never held" would be false for exactly the
+    // rows this arm fires on.
     deposit.had_hold
       ? `Security deposit hold: ${usd(deposit.amount_usd, deposit.amount_cents)} — ${deposit.disposition === "released" ? "released (not charged)" : deposit.disposition}`
-      : `Security deposit: none held`,
+      : `Deposit: none was held (RIGShare holds no deposit on new bookings)`,
     d.settled
       ? `Metered usage settled: ${usd(d.billed_usd, d.billed_cents)} charged for actual usage`
       : null,
@@ -2426,18 +2482,6 @@ function capLabel(n: number): string {
   return n === -1 || n == null ? "Unlimited" : `${n} listing${n === 1 ? "" : "s"}`;
 }
 /**
- * Render the owner-selectable deposit tiers (Stage E2) as "None 0% / Standard
- * 15% / Higher 25%". Falls back to the flat `rate` if a policy payload predates
- * the `tiers` field (backward compatible).
- */
-function depositTierLabel(dep: NormalizedPolicy["security_deposit"]): string {
-  if (dep.tiers && dep.tiers.length) {
-    return dep.tiers.map((t) => `${t.label} ${pctLabel(t.rate)}`).join(" / ");
-  }
-  return pctLabel(dep.rate);
-}
-
-/**
  * Render the "## Economics" block from the canonical policy. Reproduces the
  * previously-hardcoded copy EXACTLY when the policy matches the enforced
  * constants — the whole point being that a price change in the app now flows
@@ -2448,7 +2492,6 @@ function renderEconomics(policy: NormalizedPolicy): string[] {
   const fee = policy.renter_service_fee;
   const sp = policy.subscription_prices;
   const caps = policy.listing_caps;
-  const dep = policy.security_deposit;
   return [
     "## Economics",
     "",
@@ -2459,7 +2502,7 @@ function renderEconomics(policy: NormalizedPolicy): string[] {
     `| Enterprise | ${usdFromCents(sp.enterprise.monthly_cents)} | ${pctLabel(c.enterprise)} | ${capLabel(caps.enterprise)} |`,
     "",
     `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total (reduced to ${pctLabel(fee.student)} for verified students); doesn't reduce your payout`,
-    `- Security deposit is owner-selectable per listing (${depositTierLabel(dep)} of rental total, minimum $${dep.min_usd} when a deposit applies) on physical/FIXED rentals, placed as an authorization hold and released within 48h of clean return. METERED per-minute Tech sessions have NO deposit; the renter authorizes a usage budget instead`,
+    `- RIGShare holds NO security deposit. Physical listings may DISPLAY an owner-stated deposit figure (deposit_display_cents — null means none stated, 0 means the owner requires none); it is never held or charged unless the renter expressly accepts a damage claim, and an accepted claim is never charged above it. METERED per-minute Tech sessions display no figure; the renter authorizes a usage budget instead`,
     "- Payouts via Stripe Connect, 48-hour hold after rental completion",
     "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",
     "",

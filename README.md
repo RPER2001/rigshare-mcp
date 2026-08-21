@@ -22,7 +22,7 @@ three authenticated (require a RIGShare API key).
 |---|---|---|
 | `rigshare_list_my_bookings` | `bookings:read` | The authed user's RIGShare bookings — equipment, dates, status, totals |
 | `rigshare_list_my_sessions` | `sessions:read` | Active + historical remote sessions (GPU alloc, hours, cost) |
-| `rigshare_create_booking` | `bookings:write` | Create a new booking. Server computes prices; client hints are ignored. Enforces ID verification, security deposit hold, and per-key budget caps |
+| `rigshare_create_booking` | `bookings:write` | Create a new booking. Server computes prices; client hints are ignored. Enforces ID verification and per-key budget caps |
 
 Read-only tools hit the public API (100 req/min/IP). Authenticated
 tools hit the `/api/v1/agent/*` surface using Bearer auth and
