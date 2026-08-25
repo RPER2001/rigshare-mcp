@@ -124,11 +124,24 @@ const BUNDLED_POLICY = {
   version: "bundled",
   commission: { free: 0.15, pro: 0.1, enterprise: 0.07, student: 0.07 },
   renter_service_fee: { standard: 0.07, student: 0.03 },
+  // RIGShare's student rate has a KILL SWITCH (STUDENT_RATE_DISABLED). The two
+  // `student` rates above are what a verified student is charged WHILE it is on;
+  // with it off they are charged the standard figures. This fallback cannot know
+  // which — it renders precisely when /policy is unreachable — so it says so:
+  // `null` means UNKNOWN, and no renderer may turn it into "students pay 3%".
+  // Never hardcode `true` here to make the copy read better; a stale 3% promise
+  // against a 7% checkout is the drift this whole endpoint exists to end.
+  student_rate_active: null as boolean | null,
   subscription_prices: {
     pro: { monthly_cents: 4999, yearly_cents: 49900 },
     enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
   },
-  listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
+  // `student: null` — NOT 2. RIGShare published a 2-listing student cap that was
+  // enforced nowhere (checkListingLimit resolves from OwnerSubscription and never
+  // consults StudentProfile), and retired the CLAIM rather than starting to
+  // enforce it. null means "no student-specific cap exists"; it is not zero and
+  // must never be rendered as "unlimited".
+  listing_caps: { free: 5, pro: 15, enterprise: -1, student: null as number | null },
   // FACILITATOR MODEL (2026-08-01): RIGShare holds NO deposit on any new
   // booking. Mirrors the live /policy payload's facilitator block (audit W8 —
   // the pre-facilitator 15/25% hold tiers sat here months after the model
@@ -217,11 +230,16 @@ type NormalizedPolicy = {
   version: string;
   commission: { free: number; pro: number; enterprise: number; student: number };
   renter_service_fee: { standard: number; student: number };
+  /** Tri-state. true = the reduced student rates above are being charged;
+   *  false = they are not, and a student pays the standard figures; null =
+   *  unknown (the bundled fallback, or a /policy payload predating the field).
+   *  Renderers must only make the student claim on `true`. */
+  student_rate_active: boolean | null;
   subscription_prices: {
     pro: { monthly_cents: number; yearly_cents: number };
     enterprise: { monthly_cents: number; yearly_cents: number };
   };
-  listing_caps: { free: number; pro: number; enterprise: number; student: number };
+  listing_caps: { free: number; pro: number; enterprise: number; student: number | null };
   // `owner_selectable` + `tiers` are additive (Stage E2) — optional so a live
   // payload that predates them still normalizes cleanly and falls back to `rate`.
   // The facilitator-model keys (held/model/display bounds/note) are optional for
@@ -553,8 +571,10 @@ registerRigTool(
       "EXACT cost a rigshare_create_booking would charge, but creates nothing and",
       "charges nothing. Call this FIRST, before rigshare_create_booking, to show",
       "the renter the full breakdown and get their consent before any money",
-      "moves: rental subtotal, renter service fee (student 3% vs 7% resolved",
-      "server-side), delivery, coverage/egress, and the grand total, all in cents",
+      "moves: rental subtotal, renter service fee (7%, or RIGShare's reduced",
+      "verified-student rate where that rate is in effect \u2014 always resolved",
+      "server-side, never quoted from here), delivery, coverage/egress, and the",
+      "grand total, all in cents",
       "plus formatted USD. NO security deposit is held, authorized, or charged on",
       "any new booking — security_deposit_cents is 0, and deposit_display_cents",
       "is the owner's DISPLAYED figure only (null = owner stated none, 0 = owner",
@@ -957,7 +977,7 @@ server.registerResource(
   {
     title: "RIGShare pricing & fees (canonical)",
     description:
-      "Live commission tiers, renter service fee (incl. student 3%), subscription prices, listing caps, security-deposit rules, and cancellation schedules — sourced from RIGShare's enforced constants via /api/public/v1/policy. Falls back to bundled copy if unreachable.",
+      "Live commission tiers, renter service fee (including the reduced verified-student rate and `student_rate_active`, which says whether that rate is currently being charged at all), subscription prices, listing caps, security-deposit rules, and cancellation schedules — sourced from RIGShare's enforced constants via /api/public/v1/policy. Falls back to bundled copy if unreachable, in which case `student_rate_active` is null: unknown, not yes.",
     mimeType: "application/json",
   },
   async (uri) => {
@@ -2452,6 +2472,14 @@ function coercePolicy(p: any): NormalizedPolicy {
     version: typeof p.version === "string" ? p.version : B.version,
     commission: { ...B.commission, ...(p.commission || {}) },
     renter_service_fee: { ...B.renter_service_fee, ...(p.renter_service_fee || {}) },
+    // WHITELISTED, not spread — and this one is load-bearing. The seeded
+    // knowledge entries in the app tell every agent that the live answer to
+    // "do students pay 3%?" is this field; dropping it here left the one
+    // in-repo consumer of /policy unable to see the answer it was sent for.
+    // Only a real boolean is taken: anything else (absent, a string, an older
+    // payload) stays `null` = unknown, never a default of `true`.
+    student_rate_active:
+      typeof p.student_rate_active === "boolean" ? p.student_rate_active : null,
     subscription_prices: {
       pro: { ...B.subscription_prices.pro, ...(p.subscription_prices?.pro || {}) },
       enterprise: {
@@ -2478,8 +2506,13 @@ function usdFromCents(cents: number): string {
   if (!cents) return "$0";
   return `$${(cents / 100).toFixed(2)}`;
 }
-function capLabel(n: number): string {
-  return n === -1 || n == null ? "Unlimited" : `${n} listing${n === 1 ? "" : "s"}`;
+function capLabel(n: number | null | undefined): string {
+  // -1 is the app's sentinel for "unlimited" (ENTERPRISE.maxListings). null is
+  // NOT: it means the payload published no cap for this tier, and rendering
+  // that as "Unlimited" is a positive claim invented out of an absence.
+  if (n === -1) return "Unlimited";
+  if (n == null) return "Not published";
+  return `${n} listing${n === 1 ? "" : "s"}`;
 }
 /**
  * Render the "## Economics" block from the canonical policy. Reproduces the
@@ -2501,7 +2534,18 @@ function renderEconomics(policy: NormalizedPolicy): string[] {
     `| Pro | ${usdFromCents(sp.pro.monthly_cents)} | ${pctLabel(c.pro)} | ${capLabel(caps.pro)} |`,
     `| Enterprise | ${usdFromCents(sp.enterprise.monthly_cents)} | ${pctLabel(c.enterprise)} | ${capLabel(caps.enterprise)} |`,
     "",
-    `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total (reduced to ${pctLabel(fee.student)} for verified students); doesn't reduce your payout`,
+    // The student clause is only ASSERTED when /policy said the rate is on.
+    // `false` drops it entirely; `null` (bundled fallback, or a payload that
+    // predates the field) says the status is unknown and names where to look,
+    // because quoting a rate we cannot confirm against a checkout that charges
+    // the standard one is exactly the copy drift this file stopped hardcoding.
+    `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total${
+      policy.student_rate_active === true
+        ? ` (reduced to ${pctLabel(fee.student)} for verified students)`
+        : policy.student_rate_active === null
+          ? " (RIGShare also runs a reduced verified-student rate; whether it is currently being charged is published live at /api/public/v1/policy \"student_rate_active\", which this copy could not reach)"
+          : ""
+    }; doesn't reduce your payout`,
     `- RIGShare holds NO security deposit. Physical listings may DISPLAY an owner-stated deposit figure (deposit_display_cents — null means none stated, 0 means the owner requires none); it is never held or charged unless the renter expressly accepts a damage claim, and an accepted claim is never charged above it. METERED per-minute Tech sessions display no figure; the renter authorizes a usage budget instead`,
     "- Payouts via Stripe Connect, 48-hour hold after rental completion",
     "- Buy-now-pay-later at checkout (Afterpay, Klarna, Affirm, Zip) — improves your conversion with no extra work",

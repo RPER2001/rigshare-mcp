@@ -328,8 +328,14 @@ check(
     fallbackTxt.includes("| Enterprise | $149.99 | 7% | Unlimited |"),
 );
 check(
-  "onboarding: bundled fee + deposit copy (3% student / minimum $100)",
-  fallbackTxt.includes("reduced to 3% for verified students") &&
+  // The bundled fallback CANNOT know whether RIGShare's student rate is
+  // currently switched on (STUDENT_RATE_DISABLED lives in the app), so
+  // `student_rate_active` is null there and the copy must NOT assert 3%.
+  // It names the live field instead. Asserting the reduction from a null is
+  // exactly the drift this fallback is not allowed to reintroduce.
+  "onboarding: bundled fee copy does NOT promise 3% from an unknown state",
+  !fallbackTxt.includes("reduced to 3% for verified students") &&
+    fallbackTxt.includes("student_rate_active") &&
     fallbackTxt.includes("minimum $100"),
 );
 check(
@@ -348,11 +354,14 @@ globalThis.fetch = async () => ({
     version: "live-test",
     commission: { free: 0.2, pro: 0.12, enterprise: 0.08, student: 0.07 },
     renter_service_fee: { standard: 0.07, student: 0.03 },
+    // The live payload is the ONLY place this can be known. `true` here is what
+    // licenses the "reduced to 3%" clause below.
+    student_rate_active: true,
     subscription_prices: {
       pro: { monthly_cents: 5999, yearly_cents: 59900 },
       enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
     },
-    listing_caps: { free: 5, pro: 15, enterprise: -1, student: 2 },
+    listing_caps: { free: 5, pro: 15, enterprise: -1, student: null },
     security_deposit: { rate: 0.15, min_cents: 10000, min_usd: 100, metered: false },
   }),
 });
@@ -368,6 +377,10 @@ check(
     liveTxt.includes("8%"),
 );
 check("onboarding: renders LIVE Pro price $59.99", liveTxt.includes("$59.99"));
+check(
+  "onboarding: quotes the student reduction ONLY because /policy said the rate is active",
+  liveTxt.includes("reduced to 3% for verified students"),
+);
 
 await client.close();
 await server.close();

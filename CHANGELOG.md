@@ -5,6 +5,35 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+NOT PUBLISHED. The source in this repo is corrected; shipping it requires a
+version bump in THREE places (`package.json`, `src/index.ts` `VERSION`,
+`server.json` ×2), then `npm publish` followed by `mcp-publisher`.
+
+### Fixed
+- **`student_rate_active` is no longer discarded.** RIGShare's reduced
+  verified-student rate has a kill switch, and `GET /api/public/v1/policy`
+  publishes `student_rate_active` so a consumer can tell whether the rate is
+  actually being charged. `coercePolicy` whitelists fields and was dropping
+  exactly that one, so this package could not see the answer it was fetching —
+  while the app's seeded AI knowledge entries now tell every agent that this
+  field IS the live answer. It is passed through, and only a real boolean is
+  accepted (anything else stays `null` = unknown, never a default of "yes").
+- **No static string promises the student rate any more.** The quote-booking
+  tool description, the `rigshare://pricing` resource description and the
+  rendered Economics bullet all asserted "student 3%" unconditionally. The
+  bullet now renders the reduction only when the live policy says the rate is
+  active, says the status is unknown when serving the bundled fallback, and
+  omits the clause entirely when the rate is off.
+- **The bundled fallback stops making claims it cannot know.** It carries
+  `student_rate_active: null` — it renders precisely when `/policy` is
+  unreachable, so "unknown" is the only honest value.
+- **`listing_caps.student` is `null`, not `2`.** RIGShare published a 2-listing
+  student cap that was enforced nowhere and has retired the claim rather than
+  starting to enforce it. `capLabel` no longer renders a null cap as
+  "Unlimited" — that was a positive claim invented out of an absence.
+
 ## [2.0.0] - 2026-07-09
 
 ### Added (additive modern-MCP surface — no change to existing tool behavior)
