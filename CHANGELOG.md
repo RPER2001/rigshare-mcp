@@ -5,11 +5,36 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] — 2026-09-07
 
-NOT PUBLISHED. The source in this repo is corrected; shipping it requires a
-version bump in THREE places (`package.json`, `src/index.ts` `VERSION`,
-`server.json` ×2), then `npm publish` followed by `mcp-publisher`.
+Agents can now run the whole loop — book, list, and run a remote session —
+with the human kept in the loop for money. Backed by rigshare-app
+`feat/agent-api-booking-sessions` (new `GET /api/v1/agent/bookings/{id}`,
+`GET /api/v1/agent/sessions/{id}`, `next_action` on booking create, the
+short-rental start cutoff at quote time, and `replacement_value` /
+`deposit_display` on drafts and listings).
+
+### Added
+- **`rigshare_get_booking`** — one booking + `next_action` (who acts next,
+  plain-language instruction, exact URL). The polling half of the booking
+  flow: owner approves → renter pays at the URL → CONFIRMED → (Tech) start
+  the session.
+- **`rigshare_get_session`** — status, health, connect handoff, usage,
+  metered budget vs billed, latest telemetry (null until the node reports).
+- **`rigshare_publish_listing`** — publish a draft through the same gate the
+  apps use; gate failure codes (`ID_NOT_VERIFIED`, `STRIPE_CONNECT_REQUIRED`,
+  `TIER_LIMIT`, `INCOMPLETE`, `MODERATION_FLAGGED`) come back with a
+  relayable hint.
+- `replacement_value_usd` / `deposit_display_usd` on
+  `rigshare_save_draft_listing` and `rigshare_create_listing` — a physical
+  listing needs a replacement value to publish (it caps the deposit an owner
+  may display at 10% of it).
+- `rigshare_create_booking` renders the server's `next_action` and documents
+  the four-hour start-time rule (ISO date-time with offset, by 4:00 PM local;
+  hourly is billed per whole hour between the instants).
+- `Dockerfile` for hosted execution (Glama / Smithery).
+
+### Fixed (carried from the unreleased 2.0.x corrections below)
 
 ### Fixed
 - **`student_rate_active` is no longer discarded.** RIGShare's reduced

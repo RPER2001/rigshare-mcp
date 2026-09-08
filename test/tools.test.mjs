@@ -1,7 +1,7 @@
 // Behavior-parity smoke test for the v2.0.0 McpServer migration.
 //
 // Boots the exported server over an in-memory transport (no stdio), lists the
-// registered tools, asserts all 17 expected tool NAMES are present with an
+// registered tools, asserts all 20 expected tool NAMES are present with an
 // inputSchema + annotations, and then invokes 3 representative tools (one public
 // read, one authed read, one authed write) through the MCP call path with a
 // MOCKED global fetch — asserting the rendered output text matches the
@@ -38,7 +38,7 @@ const EXPECTED_TOOLS = {
   ],
   rigshare_create_listing: [
     "title", "description", "category", "make", "model", "year", "condition",
-    "daily_rate_usd", "hourly_rate_usd", "weekly_rate_usd", "monthly_rate_usd",
+    "daily_rate_usd", "hourly_rate_usd", "weekly_rate_usd", "monthly_rate_usd", "replacement_value_usd", "deposit_display_usd",
     "city", "state", "zip", "photos", "booking_type", "remote_access",
     "billing_mode", "external_id",
   ],
@@ -46,6 +46,9 @@ const EXPECTED_TOOLS = {
   rigshare_sync_availability: ["external_id", "blocks"],
   rigshare_start_session: ["booking_id"],
   rigshare_end_session: ["booking_id"],
+  rigshare_get_booking: ["booking_id"],
+  rigshare_get_session: ["session_id"],
+  rigshare_publish_listing: ["draft_id", "security_ack", "ownership_ack"],
   rigshare_cancel_booking: ["booking_id", "reason"],
   rigshare_extend_session: ["booking_id", "additional_minutes"],
   rigshare_get_session_usage: ["booking_id"],
@@ -53,7 +56,7 @@ const EXPECTED_TOOLS = {
     "draft_session_id", "title", "description", "category", "make", "model",
     "year", "condition", "daily_rate_usd", "hourly_rate_usd", "weekly_rate_usd",
     "monthly_rate_usd", "city", "state", "zip", "booking_type", "billing_mode",
-    "remote_access",
+    "replacement_value_usd", "deposit_display_usd", "remote_access",
   ],
 };
 
@@ -95,7 +98,7 @@ for (const t of tools) {
 console.log("─".repeat(72));
 
 console.log("\n[a] Tool inventory parity:");
-check(`exactly 17 tools registered (got ${tools.length})`, tools.length === 17);
+check(`exactly 20 tools registered (got ${tools.length})`, tools.length === 20);
 for (const [name, fields] of Object.entries(EXPECTED_TOOLS)) {
   const t = byName.get(name);
   if (!t) {
@@ -194,8 +197,9 @@ check("quote: 'Booking quote (estimate — nothing is charged):'",
   quoteTxt.includes("Booking quote (estimate — nothing is charged):"));
 check("quote: 'Rental (2 days): $120.00'", quoteTxt.includes("Rental (2 days): $120.00"));
 check("quote: 'Renter service fee: $8.40'", quoteTxt.includes("Renter service fee: $8.40"));
-check("quote: 'Grand total incl. deposit hold: $148.40'",
-  quoteTxt.includes("Grand total incl. deposit hold: $148.40"));
+// Facilitator model: RIGShare holds no deposit, so the grand total is the
+// charged amount and the old "incl. deposit hold" wording is gone.
+check("quote: 'Grand total: $148.40'", quoteTxt.includes("Grand total: $148.40"));
 
 // (2b) Behavior-parity: date-only start/end must be ACCEPTED (backend is
 // Date.parse-lenient; the old tool forwarded any string). A stricter Zod
@@ -334,14 +338,49 @@ check(
   // It names the live field instead. Asserting the reduction from a null is
   // exactly the drift this fallback is not allowed to reintroduce.
   "onboarding: bundled fee copy does NOT promise 3% from an unknown state",
+  // (The "$100 minimum" student clause left the bundled copy with the
+  // facilitator-model rewrite; the source is the truth for wording, this
+  // check only guards the drift it was written for.)
   !fallbackTxt.includes("reduced to 3% for verified students") &&
-    fallbackTxt.includes("student_rate_active") &&
-    fallbackTxt.includes("minimum $100"),
+    fallbackTxt.includes("student_rate_active"),
 );
 check(
   "onboarding: signup URL still present",
   fallbackTxt.includes("rigshare.app/robotics-ai/register"),
 );
+
+// ── (e2) publish_listing: outbound body uses the SERVER's field names, and a
+// gate failure's `code` reaches the hint (fetchAuthJson keeps the error body).
+console.log("\n[e2] publish_listing contract:");
+{
+  let captured = null;
+  globalThis.fetch = async (_url, init) => {
+    captured = JSON.parse(init?.body || "{}");
+    return { ok: true, status: 200, json: async () => ({ success: true, data: { equipment_id: "eq-1", status: "ACTIVE", url: "https://www.rigshare.app/equipment/eq-1" } }) };
+  };
+  const pubRes = await client.callTool({
+    name: "rigshare_publish_listing",
+    arguments: { draft_id: "77777777-7777-4777-8777-777777777777", security_ack: true, ownership_ack: true },
+  });
+  check("publish: sends remote_security_ack + ownership_attested (server keys), nothing else",
+    captured !== null &&
+      captured.remote_security_ack === true &&
+      captured.ownership_attested === true &&
+      Object.keys(captured).sort().join(",") === "ownership_attested,remote_security_ack");
+  check("publish: renders the live URL on success", textOf(pubRes).includes("Live at: https://www.rigshare.app/equipment/eq-1"));
+
+  globalThis.fetch = async (_url, init) => {
+    captured = JSON.parse(init?.body || "{}");
+    return { ok: false, status: 403, json: async () => ({ error: "Identity verification required", code: "ID_NOT_VERIFIED" }) };
+  };
+  const gateRes = await client.callTool({
+    name: "rigshare_publish_listing",
+    arguments: { draft_id: "77777777-7777-4777-8777-777777777777" },
+  });
+  const gateTxt = textOf(gateRes);
+  check("publish: an unsent ack is omitted (never defaulted)", Object.keys(captured).length === 0);
+  check("publish: gate code + hint reach the agent", gateRes.isError === true && gateTxt.includes("[ID_NOT_VERIFIED]") && gateTxt.includes("identity verification"));
+}
 
 // ── (f) Owner-onboarding renders LIVE /policy values when reachable ──
 console.log("\n[f] Owner-onboarding renders LIVE /policy values:");
