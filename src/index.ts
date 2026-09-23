@@ -1914,7 +1914,9 @@ async function createBooking(args: Record<string, unknown>) {
         ? "Payment: session budget hold authorized via auto-pay — booking is CONFIRMED."
         : payment.status === "failed"
           ? `Payment: auto-pay FAILED — ${payment.error || "complete payment manually"}. The renter must finish checkout at the booking URL.`
-          : "Payment: pending — the renter completes checkout after owner approval.";
+          : /payment is processing/i.test(d.next_action?.description || "")
+            ? "Payment: processing via auto-pay. Do not pay again; the booking confirms automatically when it settles."
+            : "Payment: pending — the renter completes checkout after owner approval.";
 
   return toolText(
     [
@@ -2521,7 +2523,7 @@ async function getBooking(args: Record<string, unknown>) {
       `Booking ${d.confirmation_code || d.booking_id || "—"} (${d.role === "owner" ? "you own the listing" : "you are the renter"}):`,
       ``,
       `Status: ${d.status || "—"}`,
-      `Payment: ${d.payment?.settled ? (isMetered ? "budget hold authorized" : "paid") : "not yet paid"}`,
+      `Payment: ${d.payment?.settled ? (isMetered ? "budget hold authorized" : "paid") : /payment is processing/i.test(d.next_action?.description || "") ? "processing (do not pay again)" : "not yet paid"}`,
       `Equipment: ${d.equipment?.title || "—"}${d.equipment?.remote_access_enabled ? " (remote access" + (d.equipment?.require_mfa ? ", MFA required — start sessions from the web/mobile app" : "") + ")" : ""}`,
       `Window: ${d.start_date || "—"} → ${d.end_date || "—"} (${d.duration_type || "—"})`,
       isMetered
