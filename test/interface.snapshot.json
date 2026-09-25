@@ -1,0 +1,1645 @@
+{
+  "prompts": [
+    {
+      "arguments": [
+        {
+          "name": "workload",
+          "required": false
+        },
+        {
+          "name": "budget",
+          "required": false
+        },
+        {
+          "name": "region",
+          "required": false
+        }
+      ],
+      "name": "rent-gpu",
+      "title": "Rent a GPU / compute instance"
+    },
+    {
+      "arguments": [
+        {
+          "name": "equipment_type",
+          "required": false
+        }
+      ],
+      "name": "list-my-equipment",
+      "title": "List my equipment on RIGShare"
+    },
+    {
+      "arguments": [],
+      "name": "check-my-rentals",
+      "title": "Check my RIGShare rentals & sessions"
+    }
+  ],
+  "resourceTemplates": [],
+  "resources": [
+    {
+      "mimeType": "application/json",
+      "name": "rigshare-pricing",
+      "title": "RIGShare pricing & fees (canonical)",
+      "uri": "rigshare://pricing"
+    },
+    {
+      "mimeType": "application/json",
+      "name": "rigshare-owner-onboarding",
+      "title": "RIGShare owner onboarding (canonical)",
+      "uri": "rigshare://owner-onboarding"
+    },
+    {
+      "mimeType": "application/json",
+      "name": "rigshare-categories",
+      "title": "RIGShare equipment categories",
+      "uri": "rigshare://categories"
+    },
+    {
+      "mimeType": "text/markdown",
+      "name": "rigshare-terms",
+      "title": "RIGShare Terms & policies",
+      "uri": "rigshare://terms"
+    },
+    {
+      "mimeType": "text/markdown",
+      "name": "rigshare-how-it-works",
+      "title": "How RIGShare works",
+      "uri": "rigshare://how-it-works"
+    }
+  ],
+  "tools": [
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "access_type": {
+            "enum": [
+              "SSH",
+              "JUPYTER",
+              "DESKTOP",
+              "API"
+            ],
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "compute_architecture": {
+            "enum": [
+              "CUDA",
+              "ROCM",
+              "APPLE_SILICON",
+              "TPU",
+              "TRAINIUM",
+              "CPU"
+            ],
+            "type": "string"
+          },
+          "division": {
+            "enum": [
+              "all",
+              "construction",
+              "robotics-ai"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_price_daily_usd": {
+            "type": "number"
+          },
+          "min_price_daily_usd": {
+            "type": "number"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "remote_only": {
+            "type": "boolean"
+          },
+          "search": {
+            "type": "string"
+          },
+          "sort": {
+            "enum": [
+              "newest",
+              "price_asc",
+              "price_desc",
+              "rating"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "rigshare_search_equipment",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "listings": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "billing": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "category": {
+                  "type": "string"
+                },
+                "compute_architecture": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "condition": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "division": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "location": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "make": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "owner": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "rates_usd": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "rating": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "remote_access": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {},
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "year": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pagination": {
+            "additionalProperties": true,
+            "properties": {
+              "limit": {
+                "type": "number"
+              },
+              "page": {
+                "type": "number"
+              },
+              "total": {
+                "type": "number"
+              },
+              "total_pages": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "total": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "listings"
+        ],
+        "type": "object"
+      },
+      "title": "Search equipment"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_get_equipment",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "billing": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "type": "string"
+          },
+          "compute_architecture": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "division": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "make": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rates_usd": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rating": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote_access": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "year": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "title": "Get equipment details"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "rigshare_list_categories",
+      "outputSchema": null,
+      "title": "List categories"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "division_hint": {
+            "enum": [
+              "construction",
+              "robotics-ai",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "equipment_type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "rigshare_get_owner_onboarding",
+      "outputSchema": null,
+      "title": "Owner onboarding guide"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "PENDING",
+              "APPROVED",
+              "CONFIRMED",
+              "IN_PROGRESS",
+              "RETURN_PENDING",
+              "COMPLETED",
+              "CANCELLED",
+              "REFUNDED",
+              "DISPUTED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "rigshare_list_my_bookings",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "bookings": {
+            "items": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bookings"
+        ],
+        "type": "object"
+      },
+      "title": "List my bookings"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "provisioning",
+              "active",
+              "paused",
+              "terminated",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "rigshare_list_my_sessions",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "sessions": {
+            "items": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "title": "List my sessions"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "maximum": 25000,
+            "minimum": 0.5,
+            "type": "number"
+          },
+          "coverage_path": {
+            "enum": [
+              "WAIVER",
+              "BYOCOI"
+            ],
+            "type": "string"
+          },
+          "duration_type": {
+            "enum": [
+              "HOURLY",
+              "FOUR_HOURS",
+              "DAILY",
+              "WEEKLY",
+              "MONTHLY"
+            ],
+            "type": "string"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "equipment_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "pickup_type": {
+            "enum": [
+              "SELF_PICKUP",
+              "OWNER_DELIVERY",
+              "REMOTE_ACCESS"
+            ],
+            "type": "string"
+          },
+          "qualification_answers": {
+            "additionalProperties": {
+              "maxLength": 500,
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "qualification_version": {
+            "maxLength": 50,
+            "type": "string"
+          },
+          "start_date": {
+            "type": "string"
+          },
+          "waiver_version": {
+            "maxLength": 50,
+            "type": "string"
+          }
+        },
+        "required": [
+          "equipment_id",
+          "start_date",
+          "end_date",
+          "duration_type"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_quote_booking",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "basic_insurance_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "billing_mode": {
+            "type": "string"
+          },
+          "charged_subtotal_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "delivery_fee_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "disclaimer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimated_egress_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "formatted": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "min_budget_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "min_budget_usd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "presets": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {},
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rate_hourly_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rate_hourly_usd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rental_days": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rental_subtotal_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "security_deposit_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "service_fee_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tax": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_amount_cents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "title": "Quote booking (dry run)"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "maximum": 25000,
+            "minimum": 0.5,
+            "type": "number"
+          },
+          "coverage_path": {
+            "enum": [
+              "WAIVER",
+              "BYOCOI"
+            ],
+            "type": "string"
+          },
+          "duration_type": {
+            "enum": [
+              "HOURLY",
+              "FOUR_HOURS",
+              "DAILY",
+              "WEEKLY",
+              "MONTHLY"
+            ],
+            "type": "string"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "equipment_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 100,
+            "type": "string"
+          },
+          "pickup_type": {
+            "enum": [
+              "SELF_PICKUP",
+              "OWNER_DELIVERY",
+              "REMOTE_ACCESS"
+            ],
+            "type": "string"
+          },
+          "qualification_answers": {
+            "additionalProperties": {
+              "maxLength": 500,
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "qualification_version": {
+            "maxLength": 50,
+            "type": "string"
+          },
+          "start_date": {
+            "type": "string"
+          },
+          "waiver_version": {
+            "maxLength": 50,
+            "type": "string"
+          }
+        },
+        "required": [
+          "equipment_id",
+          "start_date",
+          "end_date",
+          "duration_type"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_create_booking",
+      "outputSchema": null,
+      "title": "Create booking"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "billing_mode": {
+            "enum": [
+              "FIXED",
+              "METERED"
+            ],
+            "type": "string"
+          },
+          "booking_type": {
+            "enum": [
+              "INSTANT",
+              "REQUEST"
+            ],
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "condition": {
+            "enum": [
+              "EXCELLENT",
+              "GOOD",
+              "FAIR"
+            ],
+            "type": "string"
+          },
+          "daily_rate_usd": {
+            "maximum": 100000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "deposit_display_usd": {
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": {
+            "maxLength": 5000,
+            "minLength": 10,
+            "type": "string"
+          },
+          "external_id": {
+            "maxLength": 100,
+            "type": "string"
+          },
+          "hourly_rate_usd": {
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "make": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 80,
+            "type": "string"
+          },
+          "monthly_rate_usd": {
+            "maximum": 2000000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "photos": {
+            "items": {
+              "anyOf": [
+                {
+                  "format": "uri",
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "angle": {
+                      "maxLength": 32,
+                      "type": "string"
+                    },
+                    "url": {
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "remote_access": {
+            "additionalProperties": false,
+            "properties": {
+              "access_type": {
+                "enum": [
+                  "SSH",
+                  "JUPYTER",
+                  "DESKTOP",
+                  "API"
+                ],
+                "type": "string"
+              },
+              "endpoint": {
+                "format": "uri",
+                "type": "string"
+              },
+              "max_concurrent": {
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "region": {
+                "maxLength": 100,
+                "type": "string"
+              },
+              "require_mfa": {
+                "type": "boolean"
+              },
+              "security_ack": {
+                "type": "boolean"
+              },
+              "specs": {
+                "maxLength": 2000,
+                "type": "string"
+              }
+            },
+            "required": [
+              "security_ack"
+            ],
+            "type": "object"
+          },
+          "replacement_value_usd": {
+            "maximum": 5000000,
+            "minimum": 50,
+            "type": "number"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 120,
+            "minLength": 5,
+            "type": "string"
+          },
+          "weekly_rate_usd": {
+            "maximum": 500000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "year": {
+            "maximum": 2035,
+            "minimum": 1950,
+            "type": "integer"
+          },
+          "zip": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "description",
+          "category",
+          "make",
+          "model",
+          "year",
+          "condition",
+          "daily_rate_usd",
+          "city",
+          "state",
+          "zip"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_create_listing",
+      "outputSchema": null,
+      "title": "Create listing"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "ends_at": {
+            "type": "string"
+          },
+          "external_id": {
+            "maxLength": 120,
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "external_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_check_availability",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "equipment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_id": {
+            "type": "string"
+          },
+          "requested_range": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "available": {
+                    "type": "boolean"
+                  },
+                  "ends_at": {
+                    "type": "string"
+                  },
+                  "starts_at": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "title": "Check availability"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "ends_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "reason": {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                "starts_at": {
+                  "format": "date-time",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "starts_at",
+                "ends_at"
+              ],
+              "type": "object"
+            },
+            "maxItems": 365,
+            "type": "array"
+          },
+          "external_id": {
+            "maxLength": 120,
+            "type": "string"
+          }
+        },
+        "required": [
+          "external_id",
+          "blocks"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_sync_availability",
+      "outputSchema": null,
+      "title": "Sync availability"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_start_session",
+      "outputSchema": null,
+      "title": "Start remote session"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_end_session",
+      "outputSchema": null,
+      "title": "End remote session"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_cancel_booking",
+      "outputSchema": null,
+      "title": "Cancel booking"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "additional_minutes": {
+            "enum": [
+              15,
+              30,
+              60
+            ],
+            "type": "number"
+          },
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id",
+          "additional_minutes"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_extend_session",
+      "outputSchema": null,
+      "title": "Extend session budget"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_get_session_usage",
+      "outputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "billedCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "booking_id": {
+            "type": "string"
+          },
+          "budgetCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "extensionOptions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {},
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finalized": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "hasActiveSession": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lowBudget": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "rateHourlyCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "remainingMinutes": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "serviceFeeCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "totalCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usageCents": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usedMinutes": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "title": "Get session usage"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "billing_mode": {
+            "enum": [
+              "FIXED",
+              "METERED"
+            ],
+            "type": "string"
+          },
+          "booking_type": {
+            "enum": [
+              "INSTANT",
+              "REQUEST"
+            ],
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "city": {
+            "maxLength": 120,
+            "type": "string"
+          },
+          "condition": {
+            "enum": [
+              "EXCELLENT",
+              "GOOD",
+              "FAIR"
+            ],
+            "type": "string"
+          },
+          "daily_rate_usd": {
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "deposit_display_usd": {
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": {
+            "maxLength": 5000,
+            "type": "string"
+          },
+          "draft_session_id": {
+            "maxLength": 128,
+            "minLength": 8,
+            "type": "string"
+          },
+          "hourly_rate_usd": {
+            "maximum": 100000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "make": {
+            "maxLength": 120,
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 120,
+            "type": "string"
+          },
+          "monthly_rate_usd": {
+            "maximum": 2000000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "remote_access": {
+            "additionalProperties": false,
+            "properties": {
+              "access_type": {
+                "enum": [
+                  "SSH",
+                  "JUPYTER",
+                  "DESKTOP",
+                  "API"
+                ],
+                "type": "string"
+              },
+              "endpoint": {
+                "format": "uri",
+                "type": "string"
+              },
+              "max_concurrent": {
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "region": {
+                "maxLength": 120,
+                "type": "string"
+              },
+              "require_mfa": {
+                "type": "boolean"
+              },
+              "specs": {
+                "maxLength": 2000,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "replacement_value_usd": {
+            "maximum": 5000000,
+            "minimum": 50,
+            "type": "number"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "weekly_rate_usd": {
+            "maximum": 500000,
+            "minimum": 0,
+            "type": "number"
+          },
+          "year": {
+            "maximum": 2035,
+            "minimum": 1950,
+            "type": "integer"
+          },
+          "zip": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "rigshare_save_draft_listing",
+      "outputSchema": null,
+      "title": "Save draft listing"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "booking_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "booking_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_get_booking",
+      "outputSchema": null,
+      "title": "Get booking status & next step"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_get_session",
+      "outputSchema": null,
+      "title": "Get remote session status"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ownership_ack": {
+            "type": "boolean"
+          },
+          "security_ack": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "draft_id"
+        ],
+        "type": "object"
+      },
+      "name": "rigshare_publish_listing",
+      "outputSchema": null,
+      "title": "Publish a draft listing"
+    }
+  ]
+}

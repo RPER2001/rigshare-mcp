@@ -197,8 +197,8 @@ check("quote: 'Booking quote (estimate — nothing is charged):'",
   quoteTxt.includes("Booking quote (estimate — nothing is charged):"));
 check("quote: 'Rental (2 days): $120.00'", quoteTxt.includes("Rental (2 days): $120.00"));
 check("quote: 'Renter service fee: $8.40'", quoteTxt.includes("Renter service fee: $8.40"));
-// Facilitator model: RIGShare holds no deposit, so the grand total is the
-// charged amount and the old "incl. deposit hold" wording is gone.
+// RIGShare holds no deposit, so the grand total is the charged amount and the
+// old "incl. deposit hold" wording is gone.
 check("quote: 'Grand total: $148.40'", quoteTxt.includes("Grand total: $148.40"));
 
 // (2b) Behavior-parity: date-only start/end must be ACCEPTED (backend is
@@ -246,7 +246,7 @@ const badRes = await client.callTool({
 });
 check("get_equipment: invalid uuid rejected (isError)", badRes.isError === true);
 
-// ── (c) Resources + prompts registered (P2-b modern MCP surface) ─────
+// ── (c) Resources + prompts registered ───────────────────────────────
 console.log("\n[c] Resources + prompts registered:");
 const { resources } = await client.listResources();
 const resUris = new Set(resources.map((r) => r.uri));
@@ -288,8 +288,8 @@ check(
   (termsRes.contents || []).some((c) => (c.text || "").includes("rigshare.app/terms")),
 );
 
-// ── (d) structuredContent (P-4) on the READ tools ───────────────────
-console.log("\n[d] structuredContent (P-4):");
+// ── (d) structuredContent on the READ tools ─────────────────────────
+console.log("\n[d] structuredContent:");
 check(
   "search: structuredContent.listings has 1 row",
   Array.isArray(searchRes.structuredContent?.listings) &&
@@ -332,15 +332,10 @@ check(
     fallbackTxt.includes("| Enterprise | $149.99 | 7% | Unlimited |"),
 );
 check(
-  // The bundled fallback CANNOT know whether RIGShare's student rate is
-  // currently switched on (STUDENT_RATE_DISABLED lives in the app), so
-  // `student_rate_active` is null there and the copy must NOT assert 3%.
-  // It names the live field instead. Asserting the reduction from a null is
-  // exactly the drift this fallback is not allowed to reintroduce.
+  // The bundled fallback CANNOT know whether RIGShare's reduced student rate
+  // is currently in effect, so `student_rate_active` is null there and the
+  // copy must NOT assert 3%. It names the live field instead.
   "onboarding: bundled fee copy does NOT promise 3% from an unknown state",
-  // (The "$100 minimum" student clause left the bundled copy with the
-  // facilitator-model rewrite; the source is the truth for wording, this
-  // check only guards the drift it was written for.)
   !fallbackTxt.includes("reduced to 3% for verified students") &&
     fallbackTxt.includes("student_rate_active"),
 );

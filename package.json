@@ -1,6 +1,6 @@
 {
   "name": "rigshare-mcp",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "mcpName": "io.github.RPER2001/rigshare",
   "description": "Rent GPUs, robots, drones, and construction gear on RIGShare; also onboards equipment owners.",
   "author": "RIGShare LLC <support@rigshare.app>",
@@ -43,7 +43,8 @@
     "prepare": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
-    "test": "tsc && node test/tools.test.mjs"
+    "test": "tsc && node test/tools.test.mjs && node test/interface.test.mjs && node test/build-output.test.mjs",
+    "prepublishOnly": "node -e \"if (process.env.RIGSHARE_MCP_PUBLISH_CHECKED !== '1') { console.error('Refusing to publish from a directory. Pack the package, check the tarball, then publish the tarball: npm publish ./rigshare-mcp-<version>.tgz'); process.exit(1); }\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

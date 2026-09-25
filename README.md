@@ -53,8 +53,8 @@ owner's behalf, and never steps up to MFA.
 | `rigshare_list_my_sessions` | `sessions:read` | Active + historical sessions |
 
 Read-only tools hit the public API (100 req/min/IP). Authenticated
-tools hit the `/api/v1/agent/*` surface using Bearer auth and
-respect the API key's configured scopes + budget caps.
+tools call the `/api/v1/agent/*` and `/api/v1/*` endpoints using Bearer
+auth and respect the API key's configured scopes + budget caps.
 
 ## Use cases
 
@@ -168,9 +168,11 @@ Then point your MCP client at the local build by changing the config:
 
 ## Environment variables
 
-- `RIGSHARE_API_KEY` — **Optional**. Enables the authenticated tools (`list_my_bookings`, `list_my_sessions`, `create_booking`). Without it, those tools return a descriptive error. Get a key at https://www.rigshare.app/profile#api-keys or email support@rigshare.app.
-- `RIGSHARE_API_BASE` — override the public API base URL. Defaults to `https://www.rigshare.app/api/public/v1`. Useful for staging or local development.
+- `RIGSHARE_API_KEY` — **Optional**. Enables the 16 authenticated tools. Without it, those tools return a descriptive error and the 4 read-only tools still work. Get a key at https://www.rigshare.app/profile#api-keys or email support@rigshare.app.
+- `RIGSHARE_BASE` — override the RIGShare host that every API base below derives from. Defaults to `https://www.rigshare.app`.
+- `RIGSHARE_API_BASE` — override the public API base URL. Defaults to `https://www.rigshare.app/api/public/v1`.
 - `RIGSHARE_AGENT_API_BASE` — override the authenticated agent API base URL. Defaults to `https://www.rigshare.app/api/v1/agent`.
+- `RIGSHARE_V1_API_BASE` — override the owner equipment/availability API base URL. Defaults to `https://www.rigshare.app/api/v1`.
 
 ### Claude Desktop config with API key
 
@@ -188,15 +190,8 @@ Then point your MCP client at the local build by changing the config:
 }
 ```
 
-Scopes required for each authenticated tool:
-
-| Tool | Minimum scope |
-|---|---|
-| `rigshare_list_my_bookings` | `bookings:read` |
-| `rigshare_list_my_sessions` | `sessions:read` |
-| `rigshare_create_booking` | `bookings:write` |
-
-Keys can be scoped narrowly (read-only) or broadly (read+write+booking), and you can set per-key daily/monthly budget caps. Manage at https://www.rigshare.app/profile#api-keys.
+The scope each authenticated tool requires is listed in the tables under
+[What it does](#what-it-does). Keys can be scoped narrowly (read-only) or broadly (read+write+booking), and you can set per-key daily/monthly budget caps. Manage at https://www.rigshare.app/profile#api-keys.
 
 ## How the data flows
 
@@ -208,7 +203,10 @@ Keys can be scoped narrowly (read-only) or broadly (read+write+booking), and you
 └────────────────┘
 ```
 
-No auth, no cookies, no user accounts — the agent reads the same data you'd see browsing rigshare.app publicly.
+The read-only tools use no auth, cookies or user accounts — the agent reads
+the same data you'd see browsing rigshare.app publicly. The authenticated
+tools call the agent and owner endpoints (`/api/v1/agent/*`, `/api/v1/*`)
+with your API key.
 
 ## Write operations
 
@@ -251,10 +249,10 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=rigshare"
 
 ## Contributing
 
-Bug reports + PRs welcome. This public repo mirrors the MCP-server
-portion of the main RIGShare monorepo (which stays private for the
-commercial marketplace code). Changes flow from the monorepo → this
-repo on each release; for hot fixes you can also PR directly here.
+Bug reports and suggestions are welcome — open an issue on this
+repository or email support@rigshare.app. This repository is updated
+automatically whenever the package changes, so changes are not merged
+here directly; accepted fixes arrive in a later update.
 
 ## License
 

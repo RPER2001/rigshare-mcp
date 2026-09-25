@@ -5,364 +5,286 @@ All notable changes to `rigshare-mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] — 2026-09-07
+Dates are the UTC day each version was published to npm. A few version
+numbers were used for development milestones that were never published on
+their own; those entries say which published release first included them.
+
+## [2.1.1] — 2026-09-25
+
+No change to tool names, input or output schemas, annotations, resources or
+prompts: existing MCP client configurations keep working unchanged.
+
+### Changed
+- Smaller package: comments are stripped from the compiled `dist/index.js`.
+
+### Fixed
+- `rigshare_create_booking` and `rigshare_get_booking` say a payment is
+  **processing** (and that the renter should not pay again) while an auto-pay
+  payment is still settling, instead of reporting it as pending or not yet
+  paid.
+
+## [2.1.0] — 2026-09-08
 
 Agents can now run the whole loop — book, list, and run a remote session —
-with the human kept in the loop for money. Backed by rigshare-app
-`feat/agent-api-booking-sessions` (new `GET /api/v1/agent/bookings/{id}`,
-`GET /api/v1/agent/sessions/{id}`, `next_action` on booking create, the
-short-rental start cutoff at quote time, and `replacement_value` /
-`deposit_display` on drafts and listings).
+with a human kept in the loop for money.
 
 ### Added
-- **`rigshare_get_booking`** — one booking + `next_action` (who acts next,
-  plain-language instruction, exact URL). The polling half of the booking
-  flow: owner approves → renter pays at the URL → CONFIRMED → (Tech) start
-  the session.
-- **`rigshare_get_session`** — status, health, connect handoff, usage,
-  metered budget vs billed, latest telemetry (null until the node reports).
-- **`rigshare_publish_listing`** — publish a draft through the same gate the
-  apps use; gate failure codes (`ID_NOT_VERIFIED`, `STRIPE_CONNECT_REQUIRED`,
-  `TIER_LIMIT`, `INCOMPLETE`, `MODERATION_FLAGGED`) come back with a
-  relayable hint.
-- `replacement_value_usd` / `deposit_display_usd` on
-  `rigshare_save_draft_listing` and `rigshare_create_listing` — a physical
-  listing needs a replacement value to publish (it caps the deposit an owner
-  may display at 10% of it).
-- `rigshare_create_booking` renders the server's `next_action` and documents
-  the four-hour start-time rule (ISO date-time with offset, by 4:00 PM local;
-  hourly is billed per whole hour between the instants).
+- **`rigshare_get_booking`** — one booking plus `next_action` (who acts next,
+  a plain-language instruction and the exact URL). The polling half of the
+  booking flow: owner approves → renter pays at the URL → CONFIRMED → (Robotics
+  & AI) start the session.
+- **`rigshare_get_session`** — status, health, connect handoff, usage, metered
+  budget vs billed, and the latest telemetry (null until the node reports).
+- **`rigshare_publish_listing`** — publish a draft through the same checks the
+  RIGShare apps use. Failure codes (`ID_NOT_VERIFIED`,
+  `STRIPE_CONNECT_REQUIRED`, `TIER_LIMIT`, `INCOMPLETE`,
+  `REPLACEMENT_VALUE_REQUIRED`, `DEPOSIT_ABOVE_LIMIT`, `MODERATION_FLAGGED`)
+  come back with a hint the agent can relay to the owner.
+- `replacement_value_usd` and `deposit_display_usd` on
+  `rigshare_save_draft_listing` and `rigshare_create_listing`. A physical
+  listing needs a replacement value to publish; it caps the deposit figure an
+  owner may display at 10% of it ($25–$1,000).
+- `rigshare_create_booking` shows the server's `next_action` and documents the
+  start-time rule for short rentals: four-hour bookings take ISO date-times
+  with a UTC offset and must start by 4:00 PM local; hourly bookings are
+  billed per whole hour between the two instants. `rigshare_quote_booking`
+  refuses a four-hour start after 4:00 PM local up front.
 - `Dockerfile` for hosted execution (Glama / Smithery).
 
-### Fixed (carried from the unreleased 2.0.x corrections below)
+### Changed
+- **RIGShare no longer holds a security deposit on new bookings.** Quotes,
+  bookings and the owner-onboarding copy show the owner's *displayed* deposit
+  figure (`deposit_display_cents`: null = the owner stated none, 0 = the owner
+  requires none). It is never held or authorized, and is charged only if the
+  renter expressly accepts a damage claim, never above that figure.
+  `rigshare_cancel_booking` reports whether an older booking had a real hold
+  (`had_hold` / `disposition`); such a hold is released, never captured.
+- `rigshare_cancel_booking`: when a booking ends before pickup is confirmed,
+  the owner delivery fee is refunded in full together with the service fee
+  charged on it.
+- The reduced verified-student service fee is no longer quoted as a fixed
+  figure in tool or resource descriptions; it is always resolved server-side.
 
 ### Fixed
-- **`student_rate_active` is no longer discarded.** RIGShare's reduced
-  verified-student rate has a kill switch, and `GET /api/public/v1/policy`
-  publishes `student_rate_active` so a consumer can tell whether the rate is
-  actually being charged. `coercePolicy` whitelists fields and was dropping
-  exactly that one, so this package could not see the answer it was fetching —
-  while the app's seeded AI knowledge entries now tell every agent that this
-  field IS the live answer. It is passed through, and only a real boolean is
-  accepted (anything else stays `null` = unknown, never a default of "yes").
-- **No static string promises the student rate any more.** The quote-booking
-  tool description, the `rigshare://pricing` resource description and the
-  rendered Economics bullet all asserted "student 3%" unconditionally. The
-  bullet now renders the reduction only when the live policy says the rate is
-  active, says the status is unknown when serving the bundled fallback, and
-  omits the clause entirely when the rate is off.
-- **The bundled fallback stops making claims it cannot know.** It carries
-  `student_rate_active: null` — it renders precisely when `/policy` is
-  unreachable, so "unknown" is the only honest value.
-- **`listing_caps.student` is `null`, not `2`.** RIGShare published a 2-listing
-  student cap that was enforced nowhere and has retired the claim rather than
-  starting to enforce it. `capLabel` no longer renders a null cap as
-  "Unlimited" — that was a positive claim invented out of an absence.
+- **`student_rate_active` is passed through.** `GET /api/public/v1/policy`
+  publishes whether the reduced student rate is currently being charged; the
+  package now keeps that field (only a real boolean is accepted — anything
+  else stays `null`, meaning unknown).
+- The owner-onboarding Economics section mentions the student rate only when
+  the live policy says it is active, says the status is unknown when it is
+  serving bundled fallback copy, and omits it when the rate is off.
+- The bundled fallback carries `student_rate_active: null`, since it is only
+  used when the live policy cannot be reached.
+- `listing_caps.student` is `null` (no student-specific cap is published)
+  rather than `2`, and a `null` cap renders as "Not published" instead of
+  "Unlimited".
 
-## [2.0.0] - 2026-07-09
+## [2.0.0] — 2026-07-09
 
-### Added (additive modern-MCP surface — no change to existing tool behavior)
-- **MCP RESOURCES** (`capabilities.resources`). Five resources registered via
-  `server.registerResource`: `rigshare://pricing` + `rigshare://owner-onboarding`
-  (backed by a NEW app endpoint `GET /api/public/v1/policy`),
-  `rigshare://categories` (backed by `/api/public/v1/categories`), and static
-  `rigshare://terms` / `rigshare://how-it-works` (URL pointers to the web pages).
-- **Durable anti-drift: pricing/onboarding copy is now sourced from the app.**
-  `rigshare_get_owner_onboarding` renders its Economics block (commission tiers,
-  subscription prices, listing caps, renter service fee incl. student 3%,
-  security-deposit rate/minimum) LIVE from `/api/public/v1/policy` — the single
-  source of truth backed by the enforced constants (`subscriptions.ts`
-  `SUBSCRIPTION_TIERS` + `STUDENT_TIER`, `stripe.ts` `RENTER_SERVICE_FEE_RATE` /
-  `SECURITY_DEPOSIT_RATE` / `SECURITY_DEPOSIT_MIN`). A price change in the app now
-  flows to the tool WITHOUT republishing this package. **Graceful fallback:** if
-  the endpoint is unreachable the tool falls back to a bundled copy that mirrors
-  the constants, so it can never break; the policy fetch is cached ~10 min. The
-  division-specific signup/how-it-works URLs stay local.
-- **MCP PROMPTS** (`capabilities.prompts`). Three guided workflows via
-  `server.registerPrompt`: `rent-gpu` (search → get → quote → book tech compute),
-  `list-my-equipment` (onboarding → save draft → publish), and
-  `check-my-rentals` (list bookings + sessions + metered usage). Each renders a
-  concise template referencing the real tool names.
-- **`structuredContent` (P-4)** on the seven READ tools (`search_equipment`,
+This release also includes the changes listed under 1.5.0 and 1.6.0 below,
+which were not published on their own.
+
+### Added
+- **MCP resources**: `rigshare://pricing` and `rigshare://owner-onboarding`
+  (read live from `GET /api/public/v1/policy`), `rigshare://categories` (from
+  `/api/public/v1/categories`), and `rigshare://terms` /
+  `rigshare://how-it-works` (links to the web pages).
+- **MCP prompts**: `rent-gpu` (search → details → quote → book compute),
+  `list-my-equipment` (onboarding → save draft → publish) and
+  `check-my-rentals` (bookings + sessions + metered usage).
+- **`structuredContent`** on the read tools (`search_equipment`,
   `get_equipment`, `quote_booking`, `list_my_bookings`, `list_my_sessions`,
-  `get_session_usage`, `check_availability`): each now declares a permissive Zod
-  `outputSchema` and returns the normalized (mostly passthrough) parsed response
-  as `structuredContent` ALONGSIDE the unchanged text, so agents can machine-read
-  results. Write tools are intentionally left text-only. Error results omit
-  `structuredContent` (the SDK skips output validation for `isError` results).
-
-### Changed (additive polish — no tool behavior change on valid input)
-- **P-8 error taxonomy on the public fetch path.** `fetchJson` now parses the
-  server's JSON error body (aligning with `fetchAuthJson`'s `data.error`
-  extraction) and classifies retryable (5xx / network → `upstream_5xx` /
-  `network_error`) vs. terminal (4xx → `client_4xx`), reflecting the code in the
-  message. **S2:** the request URL is no longer in the client-facing error string
-  (logged to stderr instead), matching `fetchAuthJson`.
-- **P-9 in-memory TTL cache** (~10 min) for the slow-moving public GETs — the
-  categories fetch and the new `/policy` fetch — so the resources + onboarding
-  tool don't re-hit the API on every call. Only clean successes are cached.
-- **NEW public app endpoint `GET /api/public/v1/policy`** (force-dynamic, no auth,
-  no secrets, cache-friendly headers): the canonical pricing / fee / deposit /
-  cancellation / draft-first-onboarding snapshot, sourced from the enforced
-  constants. `version` bumps on any canonical change.
-
-### Changed (BREAKING — internal surface only; no tool behavior change)
-- **Migrated from the low-level `Server` API to the modern `McpServer` surface**
-  of the official `@modelcontextprotocol/sdk` (bumped `^1.0.4` → `^1.29.0`; added
-  `zod ^3.25`). Every tool is now registered via `server.registerTool(name, {
-  title, description, inputSchema, annotations }, handler)` instead of the two
-  hand-written `ListToolsRequestSchema` / `CallToolRequestSchema` handlers.
-- **Hand-written JSON Schemas replaced by Zod input schemas.** Each tool's
-  `inputSchema` is now a Zod raw shape that accepts the EXACT SAME inputs (same
-  required vs. optional, enums, formats, and min/max constraints) — e.g.
-  `z.string().uuid()`, `z.string().datetime()`, `z.number().int().min().max()`,
-  `z.enum([...])`. Input is auto-validated BEFORE the handler runs, so the
-  now-redundant manual guards (UUID re-regexes, required-field/type checks, the
-  `additional_minutes` enum check, the `blocks` array check) were removed. The
-  genuinely semantic guards the schema can't express are kept: the `remote_access`
-  `security_ack === true` attestation, the "at least one photo" rule on
-  `create_listing`, and the `external_id` trim/non-empty checks.
-- **Tool annotations added** to every tool (`readOnlyHint` / `destructiveHint` /
-  `idempotentHint` / `openWorldHint`) plus a concise `title`, so MCP clients can
-  reason about which tools read vs. write vs. destroy.
-- **This is a breaking release only in the SDK/registration surface.** All 17
-  tools keep the SAME names, inputs, endpoints, auth, and rendered output text.
-  Invalid-input error messages now come from Zod (the deleted manual guards)
-  instead of the old custom strings — the only observable difference, and only on
-  malformed input. Bumped to `2.0.0` to signal the SDK dependency jump; there is
-  NO change to any tool's behavior on valid input.
-
-## [1.6.0] - 2026-07-09
-
-### Added
-- **`rigshare_cancel_booking`** (MONEY PATH, bookings:write scope) — cancels a
-  booking for the authenticated user AND issues any refund per RIGShare's
-  published cancellation policy. The refund is computed ENTIRELY server-side from
-  the booking's canonical charges + how far out the cancellation is (physical:
-  7+d 100% / 3-6d 75% / 1-2d 50% / same-day 0%, 25% on >$5k multi-day; Tech
-  remote: before-session 100% / first-hour 75% / after 0%; 7% renter service fee
-  non-refundable on renter cancels). The client CANNOT dictate the refund amount
-  or the trigger — it sends only the booking id (plus an optional audit note that
-  never affects the refund). The security-deposit hold is released (never
-  captured). Terminal-safe: cancelling an already-cancelled/completed/disputed
-  booking errors, never double-refunds. Returns the refund breakdown (refunded /
-  retained / deposit disposition). Backed by a NEW endpoint,
-  `POST /api/v1/agent/bookings/[id]/cancel`, which routes through the SAME
-  `updateBookingStatusForUser` core (→ `processAutoRefund`) the web + mobile use;
-  the trigger is derived from the authenticated role, so an agent can't inject
-  `OWNER_NO_SHOW` for a full refund.
-- **`rigshare_extend_session`** (MONEY PATH, sessions:write scope) — raises the
-  authorized per-minute budget on a running METERED (per-minute) Robotics & AI
-  session so a renter about to hit their cap can keep going. The additional
-  authorization hold + budget increase are computed SERVER-SIDE from the
-  equipment's canonical per-minute rate (client picks only a fixed 15/30/60-min
-  length); only actual usage is ever charged. Renter-only. Backed by a NEW
-  endpoint, `POST /api/v1/agent/bookings/[id]/extend`, routing through the SHARED
-  `extendMeterSessionForUser` core. Pairs with `rigshare_get_session_usage`.
-- **`rigshare_get_session_usage`** (READ, sessions:read scope) — live budget
-  snapshot for a METERED booking: authorized budget vs. used, accrued cost, a
-  low-budget warning, and the extension options. Read-only (moves no money).
-  Backed by a NEW endpoint, `GET /api/v1/agent/bookings/[id]/meter`, routing
-  through the SHARED `getMeterUsageForUser` core (renter or owner). Pairs with
-  `rigshare_extend_session`.
-- **`rigshare_save_draft_listing`** (equipment:write scope) — saves a
-  half-finished listing as a DRAFT (same fields as `rigshare_create_listing`, but
-  nothing goes live). Drafts are UNGATED: no identity verification and no Stripe
-  Connect payout setup are required to DRAFT (matching RIGShare's draft-first
-  flow); those gates + a photo are enforced only at PUBLISH. Idempotent per
-  `draft_session_id`. Backed by a NEW endpoint, `POST /api/v1/agent/drafts`, that
-  reuses the SAME `createDraftFromPhotosForUser` + `updateDraftForUser` cores the
-  mobile draft flow uses. A companion `POST /api/v1/agent/drafts/[id]/publish`
-  endpoint (reusing `publishDraftForUser`) flips a draft → ACTIVE with the full
-  publish-time gate stack intact.
-
-## [1.5.0] - 2026-07-09
-
-### Added
-- **`rigshare_quote_booking`** — DRY-RUN price quote (bookings:read scope). Makes
-  agent-driven booking SAFE: it computes the EXACT cost a `rigshare_create_booking`
-  would charge — rental subtotal, renter service fee (student 3% vs 7% resolved
-  server-side), the 15%/min-$100 security-deposit hold (0 for METERED), delivery,
-  coverage/egress, and grand total (cents + formatted USD) — but creates and
-  charges NOTHING. Previously the only pricing path was `rigshare_create_booking`,
-  which charges, so an agent booked blind; now it can preview and confirm the cost
-  with the renter first. METERED (per-minute Tech) listings return the per-hour
-  rate, minimum session budget, and budget presets instead of a fixed total (no
-  deposit). Backed by a NEW endpoint, `POST /api/v1/agent/quote`, which runs the
-  SAME validation and the SAME server-side computation as the create route
-  (`resolveEffectiveCommission` → `computeRentalQuote`) and stops before creating
-  the booking. No client price is ever sent or trusted. `rigshare_create_booking`'s
-  description now recommends quoting first.
-- **`rigshare_check_availability`** — reads the unavailability windows (blocked
-  date ranges) RIGShare holds for one of your listings, keyed by its `external_id`
-  (equipment:read scope). Optionally reports whether a requested `starts_at` →
-  `ends_at` range overlaps a blocked window. Backed by the existing
-  `GET /api/v1/availability` (no app change); the endpoint keys only on
-  `external_id` (an owner-scoped lookup), so the tool matches that exactly.
-- **`rigshare_sync_availability`** — pushes an ERP/fleet calendar to RIGShare
-  (equipment:write scope): marks date ranges UNAVAILABLE on a listing so no new
-  RIGShare booking can be created during them, identified by `external_id`.
-  Snapshot semantics — the blocks sent REPLACE the previously-synced set (pass
-  `[]` to clear); windows overlapping a CONFIRMED booking are rejected and
-  reported. Serves fleet/ERP owners who listed via `rigshare_create_listing`
-  (external_id). Backed by the existing `POST /api/v1/availability` (no app
-  change).
-
-## [1.4.0] - 2026-07-09
-
-### Fixed
-- **`rigshare_create_listing` could not publish ANY remote-access (Tech)
-  listing.** The backend hard-rejects a remote create without `security_ack`,
-  but the tool never sent it — every GPU/robot/compute listing failed with an
-  opaque 400. Added `security_ack` to the `remote_access` input (documented as
-  REQUIRED when `remote_access` is provided), threaded it into the create body,
-  and added a pre-flight check that returns a clear, actionable error before the
-  fetch when it isn't `true`.
-- **`rigshare_get_owner_onboarding` described the retired verify-first flow.**
-  Rewrote the "How to list" steps to production's **draft-first** order: sign
-  up → start the listing immediately (no verification needed to DRAFT) → at
-  Publish, RIGShare walks you through one-time identity + Stripe Connect setup
-  just-in-time → go live. Kept the note that the direct `rigshare_create_listing`
-  API path publishes immediately (no draft step), so identity + Connect must be
-  done once on the web first for that path.
-- **Onboarding pricing copy corrected.** The renter service fee is now "up to
-  7% (reduced to 3% for verified students)"; the deposit line clarifies the 15%
-  authorization hold (minimum $100) applies to physical/FIXED rentals only —
-  METERED per-minute Tech sessions have NO deposit (the renter authorizes a
-  usage budget instead).
-- **Search pagination no longer silently drops rows.** The tool advertised a
-  limit up to 100 and forwarded it, then sliced the output to 10 and reported
-  "N more omitted" — but those rows were unreachable (bumping `page` skips
-  them). It now renders every row the page returned; the caller's `limit`
-  decides how many come back.
-- **Top-level tool errors no longer leak internals.** The CallTool catch echoed
-  raw `err.message` to the model/user; it now logs the full detail to stderr
-  and returns a generic message.
-
-### Added
-- **`rigshare_end_session`** — ends the METERED (per-minute) billing clock a
-  `rigshare_start_session` started, settling the charge for EXACT usage
-  server-side and releasing the unused budget (sessions:write scope). Closes
-  the money-safety gap: search → book (budget) → start session → **end session
-  (settle)**. Backed by a new agent endpoint,
-  `POST /api/v1/agent/bookings/[id]/end`, which authorizes the caller and routes
-  through the shared `endMeteredBookingForUser` core (client amounts ignored).
-- **`compute_architecture` search filter** (`CUDA` / `ROCM` / `APPLE_SILICON` /
-  `TPU` / `TRAINIUM` / `CPU`) on `rigshare_search_equipment` — forwarded to the
-  public browse API and surfaced in each result row. Lets agents find AI compute
-  a workload can actually run on.
-- Search results now show the `four_hour` ($X/4hr) and `monthly` ($X/mo) rates
-  in addition to hourly/daily/weekly.
+  `get_session_usage`, `check_availability`), alongside the unchanged text, so
+  agents can machine-read results. Write tools remain text-only.
+- **Tool annotations** (`readOnlyHint` / `destructiveHint` / `idempotentHint`
+  / `openWorldHint`) and a short `title` on every tool.
+- **`rigshare_end_session`** — stops the per-minute meter a
+  `rigshare_start_session` started and settles the exact usage server-side,
+  releasing the unused budget (`sessions:write`).
+- Search results show four-hour (`$X/4hr`) and monthly (`$X/mo`) rates.
+- `RIGSHARE_BASE` (the host every API base derives from) and
+  `RIGSHARE_V1_API_BASE` overrides. Existing `RIGSHARE_API_BASE` /
+  `RIGSHARE_AGENT_API_BASE` settings still take precedence.
 
 ### Changed
-- **Robust base-URL derivation.** All API bases now derive from a single
-  `RIGSHARE_BASE` (default `https://www.rigshare.app`) instead of a fragile
-  `.replace(/\/agent\/?$/, "")` on the agent base. Existing `RIGSHARE_API_BASE`
-  / `RIGSHARE_AGENT_API_BASE` overrides still win (back-compat), and a new
-  optional `RIGSHARE_V1_API_BASE` override is honored.
-
-## [1.3.0] - 2026-06-10
-
-### Added
-- **`rigshare_create_listing`** — owners can now publish equipment listings
-  directly from an MCP client (equipment:write scope), for BOTH divisions:
-  construction gear and Robotics & AI hardware (remote-access config +
-  METERED per-minute billing supported). Photos are passed as https URLs
-  and ingested server-side — SSRF-validated fetch, content moderation,
-  watermarking, and re-hosting on RIGShare storage (hotlinks are never
-  stored). The backend routes through the same shared listing engine as
-  the web flow, so identity verification, Stripe Connect onboarding,
-  plan listing caps, text moderation, and the per-category qualification
-  floor all apply to API-created listings.
-- `rigshare_get_owner_onboarding` now tells agents about the direct
-  listing path when the owner has an API key.
-
-## [1.2.0] - 2026-06-10
+- **Pricing and onboarding copy is read live** from
+  `GET /api/public/v1/policy`, so a published price change reaches agents
+  without a new package release. If the endpoint is unreachable the tools fall
+  back to bundled copy and keep working. Public lookups (categories, policy)
+  are cached in memory for about 10 minutes; failures are never cached.
+- **Error messages from the public API** now include the server's error text
+  and a code: `client_4xx` (fix the request), `upstream_5xx` or
+  `network_error` (retryable). Request URLs are no longer included in the
+  message.
+- **Upgraded to the current `@modelcontextprotocol/sdk`** (`^1.29.0`, plus
+  `zod ^3.25`). Tool inputs are validated before a tool runs, so malformed
+  input now returns the validator's message instead of the old custom error
+  strings. Tool names, inputs, endpoints, auth and output text on valid input
+  are otherwise unchanged. The major version signals the SDK upgrade.
+- `rigshare_get_owner_onboarding` describes the draft-first flow: start a
+  listing right away, and complete identity and payout setup once, at
+  publish. The direct `rigshare_create_listing` path still publishes
+  immediately, so that setup must be done on the web first.
 
 ### Fixed
-- **All three authenticated tools were broken by an envelope mismatch.** The
-  agent API wraps every success payload as `{ data, success: true }`, but the
-  tool code read fields off the top level. `rigshare_list_my_bookings` and
-  `rigshare_list_my_sessions` always reported "none found", and
-  `rigshare_create_booking` created the booking server-side but reported
-  "Confirmation code: —, Booking ID: —, Total: $0.00" back to the agent.
-  `fetchAuthJson` now unwraps the envelope.
-- `rigshare_create_booking` now reads the response's flat field names
-  (`confirmation_code`, `total_amount`, …), surfaces the auto-pay
-  `payment.status` / error (previously silently dropped), and uses the
-  server's division-aware booking URL — Tech bookings previously deep-linked
-  to the construction path `/booking/<id>` instead of
-  `/robotics-ai/booking/<id>`.
-- Server version + User-Agent were stuck at 1.0.0; now derived from one
-  `VERSION` constant matching `package.json`.
+- **`rigshare_create_listing` could not publish remote-access listings.** The
+  required `security_ack` attestation is now part of the `remote_access`
+  input, is sent to the API, and a clear error is returned up front when it is
+  not `true`.
+- **Search no longer hides rows.** Every row the requested page returned is
+  shown; `limit` alone decides how many.
+- **Unexpected tool errors** return a generic message to the model; details
+  go to the server's stderr log.
+
+### Removed
+- `rigshare_create_listing`'s `remote_access` no longer offers
+  `compute_architecture` or `gpu_temp_ceiling` (added in 1.4.0).
+
+## [1.6.0] — not published
+
+Not published to npm on its own; these changes first shipped in 2.0.0.
 
 ### Added
-- **Metered (per-minute) billing support** — METERED Tech listings require an
-  authorized session budget at booking. New `budget_usd` parameter on
-  `rigshare_create_booking` (converted to `meter_budget_cents`); search/detail
-  results now flag metered listings with their per-hour metering rate; the
-  bookings list shows authorized budget and settled usage.
-- **`rigshare_start_session`** — starts a remote session on a confirmed
-  Robotics & AI booking (sessions:write scope). Returns the one-time access
-  token, connection URL, and allocated specs. Completes the agent loop:
-  search → book (budget) → start session → track usage.
-- **Coverage + qualification parameters** on `rigshare_create_booking`
+- **`rigshare_cancel_booking`** (`bookings:write`) — cancels a booking and
+  issues any refund per RIGShare's published cancellation policy, computed
+  entirely server-side (physical: 7+ days 100% / 3–6 days 75% / 1–2 days 50% /
+  same day 0%, with a 25% high-value exception on multi-day rentals over $5k;
+  Robotics & AI remote access: before the session 100% / within the first hour
+  75% / after that 0%). The client sends only the booking id and an optional
+  note; it cannot set the refund amount. Cancelling an already cancelled,
+  completed or disputed booking returns an error, never a second refund.
+- **`rigshare_extend_session`** (`sessions:write`) — raises the authorized
+  budget on a running per-minute session by 15, 30 or 60 minutes. The added
+  authorization is computed server-side from the listing's rate; only actual
+  usage is charged. Renter only.
+- **`rigshare_get_session_usage`** (`sessions:read`) — live budget snapshot for
+  a per-minute booking: authorized vs used, accrued cost, a low-budget warning
+  and the extension options. Moves no money.
+- **`rigshare_save_draft_listing`** (`equipment:write`) — saves a half-finished
+  listing as a draft. No identity or payout setup is needed to draft; those
+  checks and a photo are required at publish. Idempotent per
+  `draft_session_id`.
+
+## [1.5.0] — not published
+
+Not published to npm on its own; these changes first shipped in 2.0.0.
+
+### Added
+- **`rigshare_quote_booking`** (`bookings:read`) — a dry-run price quote: the
+  exact cost `rigshare_create_booking` would charge (rental subtotal, renter
+  service fee, delivery, coverage/egress, any deposit terms in effect at the
+  time, and the grand total, in cents and formatted USD), without creating or
+  charging anything. Per-minute listings return the hourly rate, minimum
+  session budget and budget presets instead. No client price is sent or
+  trusted.
+- **`rigshare_check_availability`** (`equipment:read`) — the unavailability
+  windows on one of your listings, looked up by its `external_id`, and
+  optionally whether a requested range overlaps one.
+- **`rigshare_sync_availability`** (`equipment:write`) — push an ERP / fleet
+  calendar onto a listing. The blocks you send replace the previously synced
+  set (send `[]` to clear); windows that overlap a confirmed booking are
+  rejected and reported back.
+
+## [1.4.0] — 2026-06-24
+
+### Added
+- **AI-compute discovery** — `rigshare_search_equipment` accepts a
+  `compute_architecture` filter (CUDA / ROCM / APPLE_SILICON / TPU / TRAINIUM /
+  CPU), and each result shows its architecture.
+- **AI-compute listing options** — `rigshare_create_listing`'s `remote_access`
+  accepts `compute_architecture` and an optional `gpu_temp_ceiling` (°C).
+- Owner onboarding and the listing `endpoint` field explain RIGShare's managed
+  tunnel for hardware without a public IP address.
+
+### Changed
+- Category examples use `AI_COMPUTE` (previously `GPU_COMPUTE`; the old value
+  is still accepted).
+
+## [1.3.0] — 2026-06-10
+
+This release also includes the changes listed under 1.2.0 below.
+
+### Added
+- **`rigshare_create_listing`** (`equipment:write`) — owners can publish
+  listings from an MCP client, in both divisions (construction, and Robotics &
+  AI with remote-access settings and per-minute billing). Photos are passed as
+  https URLs; RIGShare fetches, moderates, watermarks and re-hosts them. The
+  same requirements as the web flow apply: identity verification, payout
+  setup, plan listing limits, content moderation and category requirements.
+- `rigshare_get_owner_onboarding` mentions the direct listing path for owners
+  who have an API key.
+
+## [1.2.0] — not published
+
+Not published to npm on its own; these changes first shipped in 1.3.0.
+
+### Fixed
+- **The authenticated tools misread successful responses.**
+  `rigshare_list_my_bookings` and `rigshare_list_my_sessions` always reported
+  "none found", and `rigshare_create_booking` created the booking but showed
+  "—" for its confirmation code and booking ID. All three now read the
+  response correctly.
+- `rigshare_create_booking` shows the auto-pay payment status (and any error)
+  and links Robotics & AI bookings to the correct booking page.
+- The server reports its real version (it was stuck at 1.0.0).
+
+### Added
+- **Per-minute (metered) billing** — `budget_usd` on `rigshare_create_booking`
+  authorizes a session budget for metered listings; search and details flag
+  metered listings and their hourly rate; the bookings list shows the
+  authorized budget and settled usage.
+- **`rigshare_start_session`** (`sessions:write`) — starts a remote session on
+  a confirmed Robotics & AI booking and returns the one-time access token,
+  connection URL and allocated specs.
+- **Coverage and qualification inputs** on `rigshare_create_booking`
   (`coverage_path`, `waiver_version`, `qualification_answers`,
-  `qualification_version`) — physical/construction equipment requires a
-  coverage path (Terms §9); previously the tool offered no way to satisfy the
-  gate, so every construction booking was rejected by the booking engine.
-- `RETURN_PENDING` added to the bookings status filter enum.
+  `qualification_version`). Physical equipment requires a coverage choice;
+  without these inputs such bookings could not be made from the tool.
+- `RETURN_PENDING` in the bookings status filter.
 
-## [1.1.3] - 2026-05-02
-
-### Fixed
-- README + `smithery.yaml` corrected the API-key prefix from the typo
-  `rigsk_live_` to the actual generated prefix `rigs_live_`. No runtime
-  or tool-surface changes — docs-only fix.
-
-## [1.1.2] - 2026-04-21
-
-### Changed
-- **Source repository moved** from `RPER2001/rigshare-app/packages/mcp-rigshare`
-  (private commercial repo) to `RPER2001/rigshare-mcp` (this public repo).
-  `package.json` and `server.json` both updated to point here. No runtime or
-  tool-surface changes.
-
-## [1.1.1] - 2026-04-21
-
-### Added
-- `mcpName` property in `package.json` for Official MCP Registry compliance.
-- `server.json` manifest for registry publishing via `mcp-publisher`.
-- Published to the Official MCP Registry as `io.github.RPER2001/rigshare`.
+## [1.1.3] — 2026-05-02
 
 ### Fixed
-- `server.json` description shortened to satisfy the registry's 100-char cap.
+- README and `smithery.yaml` show the correct API-key prefix, `rigs_live_`.
+  Documentation only.
 
-## [1.1.0] - 2026-04-21
-
-### Added
-- `rigshare_get_owner_onboarding` — 7th tool. Recruits equipment OWNERS who
-  mention idle hardware. Auto-classifies robotics/AI vs construction from the
-  equipment type and returns a tailored pitch with the right signup URL,
-  commission tiers, and step-by-step instructions.
-- Brand consistency sweep: `RigShare` → `RIGShare` across tool descriptions,
-  README, and error messages.
+## [1.1.2] — 2026-04-22
 
 ### Changed
-- Empty-result search now nudges toward owner onboarding when it's likely
-  a supply-side gap.
+- `package.json` and `server.json` point to the public repository,
+  https://github.com/RPER2001/rigshare-mcp. No runtime changes.
 
-## [1.0.0] - 2026-04-20
+## [1.1.1] — 2026-04-21
+
+### Added
+- `mcpName` in `package.json` and a `server.json` manifest; published to the
+  Official MCP Registry as `io.github.RPER2001/rigshare`.
+
+### Fixed
+- Shorter `server.json` description, within the registry's 100-character
+  limit.
+
+## [1.1.0] — 2026-04-21
+
+### Added
+- `rigshare_get_owner_onboarding` — for users who own equipment. Detects
+  construction vs Robotics & AI from the equipment type and returns the
+  matching pitch, signup URL, commission tiers and step-by-step instructions.
+
+### Changed
+- An empty search result suggests owner onboarding.
+- Consistent `RIGShare` capitalization in tool descriptions, README and error
+  messages.
+
+## [1.0.0] — 2026-04-21
 
 ### Added
 - Initial release with 6 tools:
-  - **Read-only** (no auth): `rigshare_search_equipment`,
+  - **Read-only** (no API key): `rigshare_search_equipment`,
     `rigshare_get_equipment`, `rigshare_list_categories`.
-  - **Authenticated** (require `RIGSHARE_API_KEY`): `rigshare_list_my_bookings`,
-    `rigshare_list_my_sessions`, `rigshare_create_booking`.
-- Stdio transport, TypeScript implementation on `@modelcontextprotocol/sdk`.
-- Server-side price calculation for booking creation (client price hints
-  ignored).
+  - **Authenticated** (require `RIGSHARE_API_KEY`):
+    `rigshare_list_my_bookings`, `rigshare_list_my_sessions`,
+    `rigshare_create_booking`.
+- stdio transport, built on `@modelcontextprotocol/sdk`.
+- Booking prices are computed server-side (client price hints are ignored).
 - Idempotency key support for booking retries.
-- Division-aware decision-maker targeting (management for construction,
-  executive for robotics/AI) — surfaced via the search tool.

@@ -7,20 +7,21 @@
  * Model Context Protocol client (Claude Desktop, Cursor, VS Code
  * Copilot, custom agent frameworks) can call natively.
  *
- * Tools provided:
- *   - rigshare_search_equipment  — list / filter equipment by division,
- *                                  category, price, location, remote-access
- *   - rigshare_get_equipment     — full details for one listing
- *   - rigshare_list_categories   — available categories with listing counts
+ * Read-only tools (no API key; RIGShare's public API at /api/public/v1/*):
+ *   - rigshare_search_equipment      — list / filter equipment by division,
+ *                                      category, price, location, remote-access
+ *   - rigshare_get_equipment         — full details for one listing
+ *   - rigshare_list_categories       — available categories with listing counts
+ *   - rigshare_get_owner_onboarding  — listing guide for equipment owners
  *
- * The three tools above are READ-ONLY and unauthenticated — they hit
- * RIGShare's public API at /api/public/v1/*. Additional authenticated
- * tools (booking, listing, sessions) unlock with a RIGSHARE_API_KEY.
+ * 16 more tools (booking, listing, availability and remote sessions) require
+ * a RIGSHARE_API_KEY with the matching scopes; they call /api/v1/agent/* and
+ * /api/v1/*. The README lists every tool and its scope.
  *
- * RESOURCES (canonical, single-source-of-truth copy):
+ * RESOURCES:
  *   - rigshare://pricing, rigshare://owner-onboarding — backed by the
- *     app's /api/public/v1/policy endpoint (so pricing/fee/onboarding copy
- *     never drifts from the code that charges money)
+ *     public /api/public/v1/policy endpoint, so pricing, fee and onboarding
+ *     copy always matches what RIGShare currently publishes
  *   - rigshare://categories — backed by /api/public/v1/categories
  *   - rigshare://terms, rigshare://how-it-works — static URL pointers
  *
@@ -48,11 +49,10 @@ import { z } from "zod";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// Single source of truth for the RIGShare host. Every API base derives from
-// it, so pointing the server at staging/self-hosted is one env var. Trailing
-// slashes are tolerated. Default is the production Construction host — Tech
-// (tech.rigshare.app) shares the same backend, so this base is correct for
-// both divisions.
+// The RIGShare host. Every API base derives from it, so pointing the server at
+// another environment is one env var. Trailing slashes are tolerated. The
+// default serves the API for both divisions (tech.rigshare.app uses the same
+// API).
 const RIGSHARE_BASE = (
   process.env.RIGSHARE_BASE || "https://www.rigshare.app"
 ).replace(/\/+$/, "");
@@ -76,7 +76,7 @@ const RIGSHARE_V1_API =
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 // Bounded per-request timeout — a stalled endpoint must never block a tool.
 const FETCH_TIMEOUT_MS = 10_000;
@@ -89,16 +89,16 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
-      // Resources expose the canonical pricing / onboarding / category / terms
-      // copy (see registerResource calls near the bottom). Prompts expose 3
-      // guided workflows (rent-gpu / list-my-equipment / check-my-rentals).
+      // Resources expose the pricing / onboarding / category / terms copy (see
+      // the registerResource calls below). Prompts expose 3 guided workflows
+      // (rent-gpu / list-my-equipment / check-my-rentals).
       resources: {},
       prompts: {},
     },
   },
 );
 
-// ─── In-memory TTL cache for the public GET surface (P-9) ────────────
+// ─── In-memory TTL cache for the public GET surface ─────────────────
 // Categories + the /policy copy endpoint change slowly; cache them ~10 min so
 // the resources + owner-onboarding tool don't hammer the API on every call.
 const PUBLIC_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -111,43 +111,36 @@ type FetchResult = {
 };
 const publicJsonCache = new Map<string, { expires: number; value: FetchResult }>();
 
-// Bundled fallback for the canonical pricing/fee copy. Mirrors the live
-// /api/public/v1/policy payload (itself sourced from the enforced constants:
-// subscriptions.ts, stripe.ts, deposit-display.ts), so the owner-onboarding
-// tool renders identical copy whether it sourced the live /policy endpoint or
-// fell back here. This is ONLY a fallback — the live path is authoritative and
-// is what keeps copy from drifting after a price change. When the live payload
-// changes shape or values, update this block in the same PR (audit W8: the
-// pre-facilitator deposit tiers sat here for weeks after the model retired
-// them, telling agents deposits were held at 15/25% whenever /policy blipped).
+// Bundled fallback for the pricing/fee copy. Mirrors the live
+// /api/public/v1/policy payload, so the owner-onboarding tool renders identical
+// copy whether it read the live endpoint or fell back here. This is ONLY a
+// fallback — the live endpoint is authoritative and is what keeps the copy
+// current after a price change. When the live payload changes shape or values,
+// update this block in the same release, because it is what agents see
+// whenever /policy is unreachable.
 const BUNDLED_POLICY = {
   version: "bundled",
   commission: { free: 0.15, pro: 0.1, enterprise: 0.07, student: 0.07 },
   renter_service_fee: { standard: 0.07, student: 0.03 },
-  // RIGShare's student rate has a KILL SWITCH (STUDENT_RATE_DISABLED). The two
-  // `student` rates above are what a verified student is charged WHILE it is on;
-  // with it off they are charged the standard figures. This fallback cannot know
-  // which — it renders precisely when /policy is unreachable — so it says so:
-  // `null` means UNKNOWN, and no renderer may turn it into "students pay 3%".
-  // Never hardcode `true` here to make the copy read better; a stale 3% promise
-  // against a 7% checkout is the drift this whole endpoint exists to end.
+  // The reduced student rate is not always in effect. The two `student` rates
+  // above are what a verified student is charged WHILE it is on; with it off
+  // they pay the standard figures. This fallback cannot know which — it renders
+  // precisely when /policy is unreachable — so it says so: `null` means
+  // UNKNOWN, and no renderer may turn it into "students pay 3%". Never hardcode
+  // `true` here to make the copy read better; a 3% promise against a 7%
+  // checkout would be wrong.
   student_rate_active: null as boolean | null,
   subscription_prices: {
     pro: { monthly_cents: 4999, yearly_cents: 49900 },
     enterprise: { monthly_cents: 14999, yearly_cents: 149900 },
   },
-  // `student: null` — NOT 2. RIGShare published a 2-listing student cap that was
-  // enforced nowhere (checkListingLimit resolves from OwnerSubscription and never
-  // consults StudentProfile), and retired the CLAIM rather than starting to
-  // enforce it. null means "no student-specific cap exists"; it is not zero and
-  // must never be rendered as "unlimited".
+  // `student: null` — no student-specific listing cap is published. null means
+  // "no student-specific cap exists"; it is not zero and must never be rendered
+  // as "unlimited".
   listing_caps: { free: 5, pro: 15, enterprise: -1, student: null as number | null },
-  // FACILITATOR MODEL (2026-08-01): RIGShare holds NO deposit on any new
-  // booking. Mirrors the live /policy payload's facilitator block (audit W8 —
-  // the pre-facilitator 15/25% hold tiers sat here months after the model
-  // retired them, and this block genuinely renders whenever the live endpoint
-  // is unreachable). `rate`/`min_cents` are kept as keys (0) for consumers
-  // that predate the model; `tiers` are DORMANT — no tier is applied to any
+  // RIGShare holds NO deposit on any new booking. Mirrors the live /policy
+  // payload's security_deposit block. `rate`/`min_cents` are kept as keys (0)
+  // for older consumers; `tiers` are dormant — no tier is applied to any
   // booking.
   security_deposit: {
     held: false,
@@ -176,7 +169,7 @@ const BUNDLED_POLICY = {
       "silence never moves money; those claims go to owner-renter direct resolution, where the renter's " +
       "liability for actual damage remains full and contractual.",
   },
-  // Damage-claim + referral facts (additive, mirrors the live /policy payload's
+  // Damage-claim + referral facts (mirrors the live /policy payload's
   // `damage_claims` / `claim_settlement` / `referral_program` keys) so a caller
   // still gets accurate copy even when the live endpoint is unreachable.
   damage_claims: {
@@ -225,7 +218,7 @@ const BUNDLED_POLICY = {
     },
   },
 } as const;
-type DepositTier = { id: string; label: string; rate: number; dormant?: boolean };
+type PolicyDepositTierEntry = { id: string; label: string; rate: number; dormant?: boolean };
 type NormalizedPolicy = {
   version: string;
   commission: { free: number; pro: number; enterprise: number; student: number };
@@ -240,17 +233,17 @@ type NormalizedPolicy = {
     enterprise: { monthly_cents: number; yearly_cents: number };
   };
   listing_caps: { free: number; pro: number; enterprise: number; student: number | null };
-  // `owner_selectable` + `tiers` are additive (Stage E2) — optional so a live
-  // payload that predates them still normalizes cleanly and falls back to `rate`.
-  // The facilitator-model keys (held/model/display bounds/note) are optional for
-  // the same reason; the bundled fallback always supplies them.
+  // `owner_selectable` + `tiers` are optional so an older live payload that
+  // predates them still normalizes cleanly and falls back to `rate`. The
+  // held/model/display-bound/note keys are optional for the same reason; the
+  // bundled fallback always supplies them.
   security_deposit: {
     rate: number;
     min_cents: number;
     min_usd: number;
     metered: boolean;
     owner_selectable?: boolean;
-    tiers?: DepositTier[];
+    tiers?: PolicyDepositTierEntry[];
     held?: boolean;
     model?: string;
     display_field?: string;
@@ -264,10 +257,10 @@ type NormalizedPolicy = {
 };
 
 // Shape of every tool's return payload (a single text block, optionally an
-// error) — structurally the MCP CallToolResult content shape. `structuredContent`
-// is additive (P-4): read tools that declare an `outputSchema` also return the
-// normalized object here alongside the unchanged text. The SDK skips output
-// validation for `isError` results, so error paths may omit it.
+// error) — structurally the MCP CallToolResult content shape. Read tools that
+// declare an `outputSchema` also return the normalized object as
+// `structuredContent` alongside the text. The SDK skips output validation for
+// `isError` results, so error paths may omit it.
 type ToolResult = {
   content: { type: "text"; text: string }[];
   structuredContent?: Record<string, unknown>;
@@ -298,7 +291,7 @@ function registerRigTool(
       title: config.title,
       description: config.description,
       inputSchema: config.inputSchema,
-      // Additive (P-4): only present on the read tools that return conforming
+      // Only present on the read tools that return conforming
       // structuredContent. Declaring an outputSchema makes the SDK REQUIRE
       // structuredContent on every non-error return path.
       ...(config.outputSchema ? { outputSchema: config.outputSchema } : {}),
@@ -320,7 +313,7 @@ function registerRigTool(
   );
 }
 
-// ─── structuredContent output schemas (P-4) ─────────────────────────
+// ─── structuredContent output schemas ───────────────────────────────
 // Permissive by design: every field is optional/nullish so the parsed upstream
 // JSON (returned verbatim as structuredContent) always conforms. The SDK
 // validates structuredContent with z.object(shape), which IGNORES unknown keys
@@ -1062,10 +1055,10 @@ registerRigTool(
   publishListing,
 );
 
-// ─── MCP RESOURCES (canonical copy — single source of truth) ─────────
-// Backed by the app's public endpoints so the copy can never drift from the
-// code that enforces it. `rigshare://pricing` + `rigshare://owner-onboarding`
-// pull /api/public/v1/policy; `rigshare://categories` pulls the categories
+// ─── MCP RESOURCES ──────────────────────────────────────────────────
+// Backed by RIGShare's public endpoints so the copy stays current.
+// `rigshare://pricing` + `rigshare://owner-onboarding` pull
+// /api/public/v1/policy; `rigshare://categories` pulls the categories
 // endpoint; `rigshare://terms` + `rigshare://how-it-works` are static URL
 // pointers to the web pages.
 
@@ -1075,7 +1068,7 @@ server.registerResource(
   {
     title: "RIGShare pricing & fees (canonical)",
     description:
-      "Live commission tiers, renter service fee (including the reduced verified-student rate and `student_rate_active`, which says whether that rate is currently being charged at all), subscription prices, listing caps, security-deposit rules, and cancellation schedules — sourced from RIGShare's enforced constants via /api/public/v1/policy. Falls back to bundled copy if unreachable, in which case `student_rate_active` is null: unknown, not yes.",
+      "Live commission tiers, renter service fee (including the reduced verified-student rate and `student_rate_active`, which says whether that rate is currently being charged at all), subscription prices, listing caps, security-deposit rules, and cancellation schedules — sourced live from /api/public/v1/policy. Falls back to bundled copy if unreachable, in which case `student_rate_active` is null: unknown, not yes.",
     mimeType: "application/json",
   },
   async (uri) => {
@@ -1369,11 +1362,9 @@ async function searchEquipment(args: Record<string, unknown>) {
   const pagination = res.data?.pagination || {};
 
   if (listings.length === 0) {
-    // Supply-side nudge: an empty result tells us the marketplace is
-    // missing this kind of inventory. Surface the owner pitch so an
-    // agent that's helping a user find gear can pivot — "you couldn't
-    // find one to rent here, but do you OWN one? You could be the
-    // first listing in this category."
+    // An empty result means no one lists this kind of equipment yet.
+    // Point the agent at the owner pitch in case the user OWNS one and
+    // would like to be the first listing in this category.
     const divisionNote =
       args.division === "robotics-ai"
         ? " If you OWN this kind of hardware (GPU / robot / drone / 3D printer / etc.) and might want to rent it out, call rigshare_get_owner_onboarding for the listing pitch."
@@ -1387,10 +1378,9 @@ async function searchEquipment(args: Record<string, unknown>) {
   }
 
   // Compact text output — MCP clients render this directly in the chat.
-  // Render EVERY row this page returned. (Previously we sliced to 10 and said
-  // "N more omitted" — but the omitted rows were unreachable: bumping `page`
-  // skips them, since page 2 starts after the full server-side `limit`. Now the
-  // caller's `limit` alone decides how many come back, and all are shown.)
+  // Render EVERY row this page returned: the caller's `limit` alone decides
+  // how many come back (page 2 starts after the full `limit`, so hiding rows
+  // here would make them unreachable).
   const lines = listings.map((l, i) => {
     const rateStr = [
       l.rates_usd?.hourly ? `$${l.rates_usd.hourly}/hr` : null,
@@ -1476,7 +1466,7 @@ async function getEquipment(args: Record<string, unknown>) {
   return toolData(description, l as Record<string, unknown>);
 }
 
-/** List categories + counts. Cached ~10 min in-memory (P-9). */
+/** List categories + counts. Cached ~10 min in-memory. */
 async function listCategories() {
   const res = await fetchJsonCached(`${RIGSHARE_API}/categories`, PUBLIC_CACHE_TTL_MS);
   if (res.error) return toolError(res.error);
@@ -1503,15 +1493,14 @@ async function listCategories() {
 }
 
 /**
- * Owner recruitment pitch. No auth. Fetches current pricing/onboarding copy
+ * Owner onboarding guide. No auth. Fetches current pricing/onboarding copy
  * from /policy (short TTL cache, bounded timeout) and gracefully falls back to
  * bundled copy if unreachable — so it never blocks or breaks.
  * Called by AI agents when a user mentions they OWN equipment, or
- * when a search comes back empty (suggesting the supply side of the
- * marketplace needs growth in that category).
+ * when a search comes back empty (no listings in that category yet).
  *
  * Returns a tailored Markdown-ish blurb with:
- *   - The economic pitch (commission rates, payout cadence, ramp)
+ *   - The economics (commission rates, fees, payout timing)
  *   - Division-specific capabilities (remote access for robotics/AI,
  *     GPS + insurance for construction)
  *   - The exact signup URL
@@ -1519,19 +1508,17 @@ async function listCategories() {
  *     agreeing to
  *
  * Agents can use this to turn "I have a spare H100 sitting idle" into
- * a direct signup link inside Claude Desktop / Cursor. Supply-side
- * acquisition via MCP — a play very few marketplaces have running.
+ * a direct signup link inside their MCP client.
  */
 async function getOwnerOnboarding(args: Record<string, unknown>) {
   const equipmentType =
     typeof args.equipment_type === "string" ? args.equipment_type.trim() : "";
   const hint = typeof args.division_hint === "string" ? args.division_hint : "";
 
-  // Source the pricing/fee/commission copy LIVE from the app's /policy endpoint
-  // (the single source of truth), so a price change never leaves this
-  // independently-published package stale. getPolicy() ALWAYS returns a usable
-  // object — on any fetch failure it falls back to BUNDLED_POLICY (which mirrors
-  // the enforced constants), so this tool can never break on unreachable policy.
+  // Read the pricing/fee/commission copy LIVE from the public /policy endpoint,
+  // so a price change never leaves this package stale. getPolicy() ALWAYS
+  // returns a usable object — on any fetch failure it falls back to
+  // BUNDLED_POLICY, so this tool can never break on an unreachable endpoint.
   const policy = await getPolicy();
 
   // Classify division from the equipment string if the agent didn't pass a hint
@@ -1554,7 +1541,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
     "",
     "RIGShare is a peer-to-peer rental marketplace. Owners list idle equipment; renters book by the hour, day, or week. You keep the bulk of every rental — RIGShare handles payments (Stripe), insurance proof, and identity verification. RIGShare does NOT hold security deposits \u2014 you state a deposit figure that is displayed on your listing and only charged if a renter accepts a damage claim. You control pricing, availability, and who can rent.",
     "",
-    // Rendered from the canonical /policy copy (falls back to bundled values).
+    // Rendered from the live /policy copy (falls back to bundled values).
     ...renderEconomics(policy),
   );
 
@@ -1567,7 +1554,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
       "- **Four remote-access modes** on a remote-eligible listing (AI compute, AI infrastructure, IoT sensors): SSH terminal, Jupyter notebook, VNC desktop, or plain HTTP API proxying",
       "- **AES-256-GCM encrypted** credential + endpoint storage — plaintext API keys never stored",
       "- **Per-equipment MFA (TOTP)** enforcement for sensitive hardware — prevents stolen-token attacks",
-      "- **Session audit logs** (immutable SessionEvent records) for compliance/disputes",
+      "- **Session audit logs** (immutable session event records) for compliance/disputes",
       "- **Live telemetry** — CPU, GPU, memory, network metrics pushed by your server to renters in real time",
       "- **Optional video feed** for physical hardware (HLS, MJPEG, iframe)",
       "- **Per-session concurrency caps** you set — one renter at a time, or many",
@@ -1611,7 +1598,7 @@ async function getOwnerOnboarding(args: Record<string, unknown>) {
       ? "1. Sign up at **https://www.rigshare.app/robotics-ai/register** (or log in if you already have an account)."
       : "1. Sign up at **https://www.rigshare.app/signup** (or log in if you already have an account).",
     looksRoboticsAi
-      ? "2. Start your listing right away at **https://www.rigshare.app/robotics-ai/list** — no verification needed to DRAFT: add your title, rates, photos, and specs. For remote-access-eligible gear (AI compute, AI infrastructure, IoT sensors), configure your endpoint URL (HTTPS required) + optional API key; RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with SSRF protection and per-session rate limits."
+      ? "2. Start your listing right away at **https://www.rigshare.app/robotics-ai/list** — no verification needed to DRAFT: add your title, rates, photos, and specs. For remote-access-eligible gear (AI compute, AI infrastructure, IoT sensors), configure your endpoint URL (HTTPS required) + optional API key; RIGShare encrypts everything server-side and proxies renter traffic through a managed gateway with request validation and per-session rate limits."
       : "2. Start your listing right away at **https://www.rigshare.app/list-equipment** — no verification needed to DRAFT: add your title, hourly/daily/weekly/monthly rates, photos (front, sides, back; 5 required for engine-based categories), and specs. Set availability and delivery radius.",
     "3. When you hit **Publish**, RIGShare walks you through the one-time setup just-in-time: identity verification (Stripe Identity, ~3 min) and Stripe Connect payout onboarding (~5 min). You only do this once.",
     "4. Publish — your listing goes live, renters can book immediately, and you get a notification on each booking.",
@@ -1672,12 +1659,11 @@ async function fetchAuthJson(
           `RIGShare Agent API returned HTTP ${res.status}`,
       };
     }
-    // The agent API wraps every success payload as { data, success: true }
-    // (apiSuccess in app/_lib/api-auth.ts) — unwrap here so tool code reads
-    // payload fields directly. Pre-1.2.0 this was NOT unwrapped, which made
-    // list_my_bookings / list_my_sessions always report "none found" and
-    // create_booking report "—" for every field of a successfully created
-    // booking.
+    // The agent API wraps every success payload as { data, success: true } —
+    // unwrap here so tool code reads payload fields directly. Before 1.2.0 this
+    // was NOT unwrapped, which made list_my_bookings / list_my_sessions always
+    // report "none found" and create_booking report "—" for every field of a
+    // successfully created booking.
     const payload =
       data && typeof data === "object" && "success" in (data as any) && "data" in (data as any)
         ? (data as any).data
@@ -1758,8 +1744,8 @@ async function listMySessions(args: Record<string, unknown>) {
 
 /**
  * DRY-RUN price quote. Same inputs as createBooking (minus idempotency_key);
- * POSTs to the /quote endpoint, which recomputes the breakdown server-side via
- * the SAME core createBooking uses and STOPS before creating/charging anything.
+ * POSTs to the /quote endpoint, which computes the breakdown server-side exactly
+ * as booking creation would and STOPS before creating/charging anything.
  * Renders the readable breakdown so an agent can confirm cost with the renter
  * before committing money. No client price is sent or trusted.
  */
@@ -1834,7 +1820,7 @@ async function quoteBooking(args: Record<string, unknown>) {
     (d.basic_insurance_cents || 0) > 0 ? `Basic coverage: ${f.basic_insurance || dollars(d.basic_insurance_cents)}` : null,
     (d.estimated_egress_cents || 0) > 0 ? `Estimated network egress: ${f.estimated_egress || dollars(d.estimated_egress_cents)}` : null,
     `Charged now (pre-tax): ${f.charged_now || dollars(d.charged_subtotal_cents)}`,
-    // Facilitator model: RIGShare holds no deposit. TRI-STATE — null (owner
+    // RIGShare holds no deposit. TRI-STATE — null (owner
     // states no figure) renders nothing; 0 renders the owner's affirmative
     // no-deposit statement; >0 the displayed figure. Never coerce null to $0.
     d.deposit_display_cents == null
@@ -1881,7 +1867,7 @@ async function createBooking(args: Record<string, unknown>) {
   });
   if (res.error) return toolError(res.error);
 
-  // Response payload is FLAT (apiSuccess envelope already unwrapped by
+  // Response payload is FLAT (success envelope already unwrapped by
   // fetchAuthJson): booking_id, confirmation_code, status, total_amount,
   // security_deposit, billing_mode, meter_budget_cents, url, payment{...}.
   const d = (res.data || {}) as any;
@@ -1948,10 +1934,9 @@ async function createListing(args: Record<string, unknown>) {
   }
 
   const remote = (args.remote_access || undefined) as Record<string, unknown> | undefined;
-  // Remote-access listings are legally un-publishable without the security
-  // attestation — the backend hard-rejects a remote create when it's falsy
-  // (app/_actions/equipment.ts). Fail fast with an actionable message instead
-  // of letting the agent eat an opaque backend 400.
+  // Remote-access listings cannot be published without the security
+  // attestation — the API rejects a remote create when it's falsy. Fail fast
+  // with an actionable message instead of returning an opaque 400.
   if (remote && remote.security_ack !== true) {
     return toolError(
       "Remote-access listings require security_ack: true — you attest the endpoint is secured and accept the Terms & Liability Waiver.",
@@ -1986,8 +1971,8 @@ async function createListing(args: Record<string, unknown>) {
             region: remote.region,
             max_concurrent: remote.max_concurrent,
             require_mfa: remote.require_mfa,
-            // Legal attestation — threaded through to remoteSecurityAck on the
-            // sync route; the shared core rejects a remote create without it.
+            // The owner's security attestation; the API rejects a remote
+            // create without it.
             security_ack: remote.security_ack,
           },
         }
@@ -2303,9 +2288,9 @@ async function cancelBooking(args: Record<string, unknown>) {
     (refund.retained_cents || 0) > 0
       ? `Retained (non-refundable per policy, e.g. service fee): ${usd(refund.retained_usd, refund.retained_cents)}`
       : null,
-    // had_hold means a REAL Stripe authorization existed (a legacy pre-model
-    // booking) — say so honestly; "never held" would be false for exactly the
-    // rows this arm fires on.
+    // had_hold means a REAL card authorization existed (an older booking made
+    // before RIGShare stopped holding deposits) — say so honestly; "never
+    // held" would be false for exactly those bookings.
     deposit.had_hold
       ? `Security deposit hold: ${usd(deposit.amount_usd, deposit.amount_cents)} — ${deposit.disposition === "released" ? "released (not charged)" : deposit.disposition}`
       : `Deposit: none was held (RIGShare holds no deposit on new bookings)`,
@@ -2577,7 +2562,7 @@ async function getSession(args: Record<string, unknown>) {
 /** WRITE — publish a draft through the shared publish gate. */
 async function publishListing(args: Record<string, unknown>) {
   if (!RIGSHARE_API_KEY) return toolError(API_KEY_ERROR_MSG);
-  // Server field names (app/api/v1/agent/drafts/[id]/publish): the tool's
+  // Field names expected by POST /api/v1/agent/drafts/{id}/publish: the tool's
   // agent-facing arg names are mapped here; only an explicit true is sent.
   const body: Record<string, unknown> = {};
   if (args.security_ack === true) body.remote_security_ack = true;
@@ -2638,10 +2623,10 @@ async function fetchJson(url: string): Promise<FetchResult> {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      // P-8: parse the server's JSON error body (aligns with fetchAuthJson's
-      // `data.error` extraction) and classify retryable (5xx) vs terminal (4xx),
-      // reflecting a machine-readable code in the message. S2: the request URL
-      // is logged to stderr, NEVER surfaced to the model.
+      // Parse the server's JSON error body (same `data.error` extraction as
+      // fetchAuthJson) and classify retryable (5xx) vs terminal (4xx),
+      // reflecting a machine-readable code in the message. The request URL
+      // is logged to stderr, never surfaced to the model.
       const body = await res.json().catch(() => ({} as any));
       const serverError =
         body && typeof body === "object" ? (body as any).error : undefined;
@@ -2662,7 +2647,7 @@ async function fetchJson(url: string): Promise<FetchResult> {
     const data = await res.json();
     return { data, status: res.status };
   } catch (err: any) {
-    // S2: log the URL to stderr; keep it out of the client-facing string.
+    // Log the URL to stderr; keep it out of the client-facing string.
     console.error(
       `[rigshare-mcp] network error for ${url}:`,
       err?.stack || err?.message || err,
@@ -2677,7 +2662,7 @@ async function fetchJson(url: string): Promise<FetchResult> {
 }
 
 /**
- * fetchJson with a short in-memory TTL (P-9). Only clean successes are cached —
+ * fetchJson with a short in-memory TTL. Only clean successes are cached —
  * a transient 5xx/network error is never pinned for the whole TTL. Used for the
  * slow-moving public GETs (categories + the /policy copy endpoint).
  */
@@ -2693,9 +2678,9 @@ async function fetchJsonCached(url: string, ttlMs: number): Promise<FetchResult>
 }
 
 /**
- * Fetch the canonical policy JSON (pricing/fee/deposit/onboarding facts) from
- * the app — the single source of truth. Returns the raw parsed body, or null if
- * the endpoint is unreachable (so callers fall back to BUNDLED_POLICY).
+ * Fetch the policy JSON (pricing/fee/deposit/onboarding facts) from the public
+ * /policy endpoint. Returns the raw parsed body, or null if the endpoint is
+ * unreachable (so callers fall back to BUNDLED_POLICY).
  */
 async function fetchPolicyRaw(): Promise<any | null> {
   const res = await fetchJsonCached(`${RIGSHARE_API}/policy`, PUBLIC_CACHE_TTL_MS);
@@ -2716,12 +2701,10 @@ function coercePolicy(p: any): NormalizedPolicy {
     version: typeof p.version === "string" ? p.version : B.version,
     commission: { ...B.commission, ...(p.commission || {}) },
     renter_service_fee: { ...B.renter_service_fee, ...(p.renter_service_fee || {}) },
-    // WHITELISTED, not spread — and this one is load-bearing. The seeded
-    // knowledge entries in the app tell every agent that the live answer to
-    // "do students pay 3%?" is this field; dropping it here left the one
-    // in-repo consumer of /policy unable to see the answer it was sent for.
-    // Only a real boolean is taken: anything else (absent, a string, an older
-    // payload) stays `null` = unknown, never a default of `true`.
+    // Picked explicitly, not spread: this field is the live answer to "is the
+    // reduced student rate being charged right now?". Only a real boolean is
+    // taken: anything else (absent, a string, an older payload) stays
+    // `null` = unknown, never a default of `true`.
     student_rate_active:
       typeof p.student_rate_active === "boolean" ? p.student_rate_active : null,
     subscription_prices: {
@@ -2741,7 +2724,7 @@ async function getPolicy(): Promise<NormalizedPolicy> {
   return coercePolicy(await fetchPolicyRaw());
 }
 
-// ─── Canonical-copy render helpers (sourced from /policy) ────────────
+// ─── Copy render helpers (sourced from /policy) ─────────────────────
 function pctLabel(rate: number): string {
   const v = rate * 100;
   return `${Number.isInteger(v) ? v : Number(v.toFixed(2))}%`;
@@ -2751,18 +2734,16 @@ function usdFromCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 function capLabel(n: number | null | undefined): string {
-  // -1 is the app's sentinel for "unlimited" (ENTERPRISE.maxListings). null is
-  // NOT: it means the payload published no cap for this tier, and rendering
-  // that as "Unlimited" is a positive claim invented out of an absence.
+  // -1 is the /policy payload's sentinel for "unlimited". null is NOT: it
+  // means the payload published no cap for this tier, and rendering that as
+  // "Unlimited" would be a positive claim invented out of an absence.
   if (n === -1) return "Unlimited";
   if (n == null) return "Not published";
   return `${n} listing${n === 1 ? "" : "s"}`;
 }
 /**
- * Render the "## Economics" block from the canonical policy. Reproduces the
- * previously-hardcoded copy EXACTLY when the policy matches the enforced
- * constants — the whole point being that a price change in the app now flows
- * here WITHOUT republishing this npm package.
+ * Render the "## Economics" block from the policy payload, so a published
+ * price change reaches agents WITHOUT republishing this npm package.
  */
 function renderEconomics(policy: NormalizedPolicy): string[] {
   const c = policy.commission;
@@ -2781,8 +2762,7 @@ function renderEconomics(policy: NormalizedPolicy): string[] {
     // The student clause is only ASSERTED when /policy said the rate is on.
     // `false` drops it entirely; `null` (bundled fallback, or a payload that
     // predates the field) says the status is unknown and names where to look,
-    // because quoting a rate we cannot confirm against a checkout that charges
-    // the standard one is exactly the copy drift this file stopped hardcoding.
+    // rather than quoting a rate we cannot confirm.
     `- Renters pay up to a ${pctLabel(fee.standard)} service fee on top of your rental total${
       policy.student_rate_active === true
         ? ` (reduced to ${pctLabel(fee.student)} for verified students)`
@@ -2804,7 +2784,7 @@ function toolText(text: string) {
 }
 
 /**
- * Text + structuredContent (P-4). Used by the READ tools that declare an
+ * Text + structuredContent. Used by the READ tools that declare an
  * `outputSchema` — the text is unchanged, `structuredContent` is the normalized
  * (mostly passthrough) parsed response so agents can machine-read the result.
  */

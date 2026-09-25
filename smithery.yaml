@@ -5,11 +5,8 @@
 #   - glama.ai/mcp/servers to enable the "Install Server" button
 #   - any other MCP discovery surface that follows the Smithery spec
 #
-# Without this file, those surfaces fall back to "view install
-# instructions" and the user has to copy-paste JSON into their own
-# Claude Desktop config. With this file, the platform generates the
-# config automatically and (optionally) prompts the user for their
-# API key.
+# With this file, those platforms generate the MCP client config
+# automatically and (optionally) prompt the user for their API key.
 
 startCommand:
   type: stdio
@@ -18,17 +15,18 @@ startCommand:
     title: RIGShare MCP Configuration
     description: >-
       Optional RIGShare API key. Leave blank to use the 4 public
-      read-only tools only. Supply a key to enable the 3 authenticated
-      tools (list_my_bookings, list_my_sessions, create_booking). Get
-      a key at https://www.rigshare.app/profile#api-keys.
+      read-only tools only. Supply a key to enable the 16 authenticated
+      tools (booking, listing, availability and remote sessions), each
+      limited to the scopes granted to the key. Get a key at
+      https://www.rigshare.app/profile#api-keys.
     properties:
       apiKey:
         type: string
         title: RIGShare API Key
         description: >-
           Bearer key, starts with rigs_live_. Optional. Only needed
-          for the 3 authenticated tools. Stored encrypted by your MCP
-          client; never transmitted back to smithery.ai or glama.ai.
+          for the authenticated tools. Stored by your MCP client and
+          passed to the server as RIGSHARE_API_KEY.
         format: password
     required: []
   commandFunction: |
