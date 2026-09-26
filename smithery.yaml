@@ -17,8 +17,9 @@ startCommand:
       Optional RIGShare API key. Leave blank to use the 4 public
       read-only tools only. Supply a key to enable the 16 authenticated
       tools (booking, listing, availability and remote sessions), each
-      limited to the scopes granted to the key. Get a key at
-      https://www.rigshare.app/profile#api-keys.
+      limited to the scopes granted to the key. Create a key at
+      https://www.rigshare.app/enterprise (API keys need a Pro or
+      Enterprise plan).
     properties:
       apiKey:
         type: string

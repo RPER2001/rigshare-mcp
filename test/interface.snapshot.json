@@ -78,6 +78,7 @@
         "additionalProperties": false,
         "properties": {
           "access_type": {
+            "description": "How renters connect to a remote-access listing; matches remote-access listings only.",
             "enum": [
               "SSH",
               "JUPYTER",
@@ -87,12 +88,15 @@
             "type": "string"
           },
           "category": {
+            "description": "Exact category value, e.g. AI_COMPUTE or EXCAVATORS; rigshare_list_categories returns the values that currently have listings. Overrides division. An unknown value is an error.",
             "type": "string"
           },
           "city": {
+            "description": "Exact city name, case-insensitive. There is no radius search.",
             "type": "string"
           },
           "compute_architecture": {
+            "description": "Accelerator family of an AI compute listing.",
             "enum": [
               "CUDA",
               "ROCM",
@@ -104,6 +108,7 @@
             "type": "string"
           },
           "division": {
+            "description": "Division to search (default all). Ignored when category is set.",
             "enum": [
               "all",
               "construction",
@@ -112,27 +117,34 @@
             "type": "string"
           },
           "limit": {
+            "description": "Results per page (default 25).",
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
           },
           "max_price_daily_usd": {
+            "description": "Upper bound on the listing's daily rate, in USD.",
             "type": "number"
           },
           "min_price_daily_usd": {
+            "description": "Lower bound on the listing's daily rate, in USD.",
             "type": "number"
           },
           "page": {
+            "description": "1-based page number (default 1).",
             "minimum": 1,
             "type": "integer"
           },
           "remote_only": {
+            "description": "true = only listings rented over the network (AI compute, AI infrastructure and IoT sensor listings).",
             "type": "boolean"
           },
           "search": {
+            "description": "Case-insensitive substring match on the listing title only (not the description, make/model or location).",
             "type": "string"
           },
           "sort": {
+            "description": "Default newest. price_asc / price_desc sort by daily rate; rating = highest average rating first.",
             "enum": [
               "newest",
               "price_asc",
@@ -142,6 +154,7 @@
             "type": "string"
           },
           "state": {
+            "description": "Two-letter US state code, e.g. TX (exact match).",
             "type": "string"
           }
         },
@@ -317,6 +330,7 @@
         "additionalProperties": false,
         "properties": {
           "id": {
+            "description": "Listing UUID (the id field from rigshare_search_equipment).",
             "format": "uuid",
             "type": "string"
           }
@@ -477,6 +491,7 @@
         "additionalProperties": false,
         "properties": {
           "division_hint": {
+            "description": "Set when the division is known; otherwise it is inferred from equipment_type.",
             "enum": [
               "construction",
               "robotics-ai",
@@ -485,6 +500,7 @@
             "type": "string"
           },
           "equipment_type": {
+            "description": "Free-text description of the owner's equipment, e.g. \"H100 server\" or \"mini excavator\"; used to pick the division-specific section.",
             "type": "string"
           }
         },
@@ -504,15 +520,18 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
+            "description": "Bookings per page (default 20).",
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
           },
           "page": {
+            "description": "1-based page number (default 1).",
             "minimum": 1,
             "type": "integer"
           },
           "status": {
+            "description": "Only bookings in this status.",
             "enum": [
               "PENDING",
               "APPROVED",
@@ -559,10 +578,12 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "Only sessions on this booking.",
             "format": "uuid",
             "type": "string"
           },
           "status": {
+            "description": "Only sessions in this status.",
             "enum": [
               "provisioning",
               "active",
@@ -605,11 +626,13 @@
         "additionalProperties": false,
         "properties": {
           "budget_usd": {
+            "description": "METERED listings only, and required for them: the maximum session spend to authorize, in USD, fees included. Only the minutes actually used are charged. rigshare_quote_booking returns the minimum budget and presets.",
             "maximum": 25000,
             "minimum": 0.5,
             "type": "number"
           },
           "coverage_path": {
+            "description": "Required for physical (non-remote) equipment. WAIVER = the renter accepts RIGShare's Liability Acknowledgment Waiver (only with the renter's explicit, informed consent); BYOCOI = the renter will provide their own certificate of insurance.",
             "enum": [
               "WAIVER",
               "BYOCOI"
@@ -617,6 +640,7 @@
             "type": "string"
           },
           "duration_type": {
+            "description": "Pricing unit. HOURLY bills every started hour between start and end; FOUR_HOURS bills 4-hour blocks and must start by 4:00 PM equipment-local time; DAILY bills per day; WEEKLY per started 7 days; MONTHLY per started 30 days.",
             "enum": [
               "HOURLY",
               "FOUR_HOURS",
@@ -627,13 +651,16 @@
             "type": "string"
           },
           "end_date": {
+            "description": "ISO 8601 date or date-time, after start_date. Same format rules as start_date.",
             "type": "string"
           },
           "equipment_id": {
+            "description": "Listing UUID.",
             "format": "uuid",
             "type": "string"
           },
           "pickup_type": {
+            "description": "SELF_PICKUP, or OWNER_DELIVERY (adds the owner's delivery fee). rigshare_create_booking refuses OWNER_DELIVERY on a listing that does not offer delivery and on any remote-access listing; rigshare_quote_booking does not check this, so a quote can succeed for a booking that will be refused. Omitted = REMOTE_ACCESS, which is treated as self pickup; whether a booking is remote comes from the listing itself.",
             "enum": [
               "SELF_PICKUP",
               "OWNER_DELIVERY",
@@ -646,16 +673,20 @@
               "maxLength": 500,
               "type": "string"
             },
+            "description": "Answers to the renter-qualification questionnaire, required only when the listing requires renter qualification. The questionnaire is not available through this API, so if a booking is refused for qualification the renter must book that listing on the web; retrying here will not get past it.",
             "type": "object"
           },
           "qualification_version": {
+            "description": "Version of the questionnaire the answers were given against; must match the current version.",
             "maxLength": 50,
             "type": "string"
           },
           "start_date": {
+            "description": "ISO 8601 date or date-time. A date alone is read as UTC midnight (the previous afternoon or evening in US time zones), so for HOURLY and FOUR_HOURS send a date-time with a UTC offset in the equipment's local time, e.g. 2026-09-15T08:00:00-05:00.",
             "type": "string"
           },
           "waiver_version": {
+            "description": "Version of the waiver the renter accepted. Omit to use the current version.",
             "maxLength": 50,
             "type": "string"
           }
@@ -813,11 +844,13 @@
         "additionalProperties": false,
         "properties": {
           "budget_usd": {
+            "description": "METERED listings only, and required for them: the maximum session spend to authorize, in USD, fees included. Only the minutes actually used are charged. rigshare_quote_booking returns the minimum budget and presets.",
             "maximum": 25000,
             "minimum": 0.5,
             "type": "number"
           },
           "coverage_path": {
+            "description": "Required for physical (non-remote) equipment. WAIVER = the renter accepts RIGShare's Liability Acknowledgment Waiver (only with the renter's explicit, informed consent); BYOCOI = the renter will provide their own certificate of insurance.",
             "enum": [
               "WAIVER",
               "BYOCOI"
@@ -825,6 +858,7 @@
             "type": "string"
           },
           "duration_type": {
+            "description": "Pricing unit. HOURLY bills every started hour between start and end; FOUR_HOURS bills 4-hour blocks and must start by 4:00 PM equipment-local time; DAILY bills per day; WEEKLY per started 7 days; MONTHLY per started 30 days.",
             "enum": [
               "HOURLY",
               "FOUR_HOURS",
@@ -835,17 +869,22 @@
             "type": "string"
           },
           "end_date": {
+            "description": "ISO 8601 date or date-time, after start_date. Same format rules as start_date.",
             "type": "string"
           },
           "equipment_id": {
+            "description": "Listing UUID.",
             "format": "uuid",
             "type": "string"
           },
           "idempotency_key": {
+            "description": "Optional, recommended: a new value for each booking you intend, the same value when retrying it (printable ASCII, up to 100 characters — a UUID works). A request that matches a pending, approved or confirmed booking you created in the last 5 minutes (same equipment, same dates — for a same-day remote session, the same UTC day — same duration type, and the same price, usage budget, compute environment, pickup/delivery choice and coverage choice) is never booked or charged a second time: with the same key, or with no key, you get that booking back, marked idempotent, with its payment state and next action; with a different key it is normally refused with HTTP 409 IDENTICAL_BOOKING_RECENT, which names the existing booking — confirm with the user before booking the same thing again (if the original request's key isn't on record, you get the booking back instead). Reusing a key for a request that doesn't match its booking is refused with HTTP 422 IDEMPOTENCY_KEY_REUSED: check that booking before booking again. For a per-minute (metered) listing, two requests with the same usage budget match whatever their length; a listing that serves one renter at a time has no room for a second same-day session anyway.",
             "maxLength": 100,
+            "pattern": "^[\\x20-\\x7E]*$",
             "type": "string"
           },
           "pickup_type": {
+            "description": "SELF_PICKUP, or OWNER_DELIVERY (adds the owner's delivery fee). rigshare_create_booking refuses OWNER_DELIVERY on a listing that does not offer delivery and on any remote-access listing; rigshare_quote_booking does not check this, so a quote can succeed for a booking that will be refused. Omitted = REMOTE_ACCESS, which is treated as self pickup; whether a booking is remote comes from the listing itself.",
             "enum": [
               "SELF_PICKUP",
               "OWNER_DELIVERY",
@@ -858,16 +897,20 @@
               "maxLength": 500,
               "type": "string"
             },
+            "description": "Answers to the renter-qualification questionnaire, required only when the listing requires renter qualification. The questionnaire is not available through this API, so if a booking is refused for qualification the renter must book that listing on the web; retrying here will not get past it.",
             "type": "object"
           },
           "qualification_version": {
+            "description": "Version of the questionnaire the answers were given against; must match the current version.",
             "maxLength": 50,
             "type": "string"
           },
           "start_date": {
+            "description": "ISO 8601 date or date-time. A date alone is read as UTC midnight (the previous afternoon or evening in US time zones), so for HOURLY and FOUR_HOURS send a date-time with a UTC offset in the equipment's local time, e.g. 2026-09-15T08:00:00-05:00.",
             "type": "string"
           },
           "waiver_version": {
+            "description": "Version of the waiver the renter accepted. Omit to use the current version.",
             "maxLength": 50,
             "type": "string"
           }
@@ -895,6 +938,7 @@
         "additionalProperties": false,
         "properties": {
           "billing_mode": {
+            "description": "FIXED (default): upfront pricing. METERED: per-minute session billing, for remote-access listings only; requires hourly_rate_usd.",
             "enum": [
               "FIXED",
               "METERED"
@@ -902,6 +946,7 @@
             "type": "string"
           },
           "booking_type": {
+            "description": "REQUEST: the owner approves each booking. INSTANT: renters are confirmed without approval; a physical INSTANT listing needs a street address, which the agent API cannot set. Default REQUEST.",
             "enum": [
               "INSTANT",
               "REQUEST"
@@ -909,6 +954,40 @@
             "type": "string"
           },
           "category": {
+            "description": "Listing category. Remote access is available only for AI_COMPUTE, AI_INFRASTRUCTURE and IOT_SENSORS; robots, drones and 3D printers are physical rentals.",
+            "enum": [
+              "EXCAVATORS",
+              "LOADERS_SKID_STEERS",
+              "CRANES_LIFTS",
+              "EARTHMOVING",
+              "COMPACTION",
+              "PAVEMENT_HIGHWAY",
+              "TRAILERS",
+              "GENERATORS_POWER",
+              "AIR_PUMPS",
+              "CONCRETE_MASONRY",
+              "TRENCHING_BORING",
+              "WELDING_METALWORK",
+              "POWER_TOOLS",
+              "OIL_GAS",
+              "DRONES_TECH",
+              "SCAFFOLDING_ACCESS",
+              "MOWERS_LANDSCAPING",
+              "FARMING",
+              "UTV",
+              "TELEHANDLER",
+              "TREE_CARE",
+              "FORESTRY",
+              "DUMPSTERS",
+              "ATTACHMENTS",
+              "ROBOTICS_AI",
+              "AI_COMPUTE",
+              "AI_INFRASTRUCTURE",
+              "ADDITIVE_MANUFACTURING",
+              "IOT_SENSORS",
+              "HUMANOID_ROBOTS",
+              "OTHER"
+            ],
             "type": "string"
           },
           "city": {
@@ -928,6 +1007,7 @@
             "type": "number"
           },
           "deposit_display_usd": {
+            "description": "Deposit figure displayed on the listing, in USD. RIGShare never holds or charges it on its own; it is the most RIGShare will collect if a renter expressly accepts a damage claim. 0 = the owner requires no deposit; omit to state no figure. Must be within the bound set by replacement_value_usd. Not used on remote-access listings.",
             "maximum": 1000,
             "minimum": 0,
             "type": "number"
@@ -938,10 +1018,12 @@
             "type": "string"
           },
           "external_id": {
+            "description": "Your own inventory/SKU id; rigshare_check_availability and rigshare_sync_availability find the listing by it. If you already own a listing with this external_id, this call updates that listing instead of creating a new one.",
             "maxLength": 100,
             "type": "string"
           },
           "hourly_rate_usd": {
+            "description": "Hourly rate in USD. Required for billing_mode METERED, where it is the rate the per-minute meter bills at.",
             "maximum": 100000,
             "minimum": 0,
             "type": "number"
@@ -960,6 +1042,7 @@
             "type": "number"
           },
           "photos": {
+            "description": "1-8 photos as https URLs, or {url, angle} objects where angle labels the shot (e.g. front, side, back). At least one is required.",
             "items": {
               "anyOf": [
                 {
@@ -990,8 +1073,10 @@
           },
           "remote_access": {
             "additionalProperties": false,
+            "description": "Network access for AI compute, AI infrastructure or IoT sensor listings. Omit for physical equipment.",
             "properties": {
               "access_type": {
+                "description": "How renters connect.",
                 "enum": [
                   "SSH",
                   "JUPYTER",
@@ -1001,10 +1086,12 @@
                 "type": "string"
               },
               "endpoint": {
+                "description": "https URL of the owner's service that renter sessions connect to.",
                 "format": "uri",
                 "type": "string"
               },
               "max_concurrent": {
+                "description": "Maximum simultaneous renter sessions.",
                 "maximum": 1000,
                 "minimum": 1,
                 "type": "integer"
@@ -1014,12 +1101,15 @@
                 "type": "string"
               },
               "require_mfa": {
+                "description": "Require renters to pass TOTP multi-factor authentication to start a session (default true). Agents cannot start sessions on such listings.",
                 "type": "boolean"
               },
               "security_ack": {
+                "description": "The owner's attestation that the endpoint is secured and that they accept the Terms and Liability Waiver. Must be true to publish; send it only when the owner has actually given it.",
                 "type": "boolean"
               },
               "specs": {
+                "description": "Hardware specs shown to renters.",
                 "maxLength": 2000,
                 "type": "string"
               }
@@ -1030,11 +1120,13 @@
             "type": "object"
           },
           "replacement_value_usd": {
+            "description": "What the item costs to replace, in USD. Required to publish a physical (non-remote) listing. It bounds the deposit figure the listing may display: 10% of this value, at least $25 and at most $1,000.",
             "maximum": 5000000,
             "minimum": 50,
             "type": "number"
           },
           "state": {
+            "description": "Two-letter US state code, e.g. TX.",
             "type": "string"
           },
           "title": {
@@ -1053,6 +1145,7 @@
             "type": "integer"
           },
           "zip": {
+            "description": "5-digit or ZIP+4 US postal code.",
             "type": "string"
           }
         },
@@ -1085,13 +1178,16 @@
         "additionalProperties": false,
         "properties": {
           "ends_at": {
+            "description": "End of the range to test (ISO 8601). Needs starts_at.",
             "type": "string"
           },
           "external_id": {
+            "description": "The inventory/SKU id the listing was created with (rigshare_create_listing's external_id).",
             "maxLength": 120,
             "type": "string"
           },
           "starts_at": {
+            "description": "Start of a range to test against the blocked windows (ISO 8601). Needs ends_at.",
             "type": "string"
           }
         },
@@ -1159,18 +1255,22 @@
         "additionalProperties": false,
         "properties": {
           "blocks": {
+            "description": "The complete set of unavailable windows for this listing; replaces the previously synced set.",
             "items": {
               "additionalProperties": false,
               "properties": {
                 "ends_at": {
+                  "description": "ISO 8601 date-time the window ends, after starts_at. Same format as starts_at.",
                   "format": "date-time",
                   "type": "string"
                 },
                 "reason": {
+                  "description": "Note stored on the block, prefixed \"External sync:\" unless it already starts with \"ERP:\".",
                   "maxLength": 200,
                   "type": "string"
                 },
                 "starts_at": {
+                  "description": "ISO 8601 date-time the window starts, with Z or a UTC offset (e.g. 2026-09-15T08:00:00-05:00); sent to RIGShare as UTC. A time with neither is refused.",
                   "format": "date-time",
                   "type": "string"
                 }
@@ -1185,6 +1285,7 @@
             "type": "array"
           },
           "external_id": {
+            "description": "The inventory/SKU id the listing was created with (rigshare_create_listing's external_id).",
             "maxLength": 120,
             "type": "string"
           }
@@ -1210,6 +1311,7 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "The booking to start a session on.",
             "format": "uuid",
             "type": "string"
           }
@@ -1234,6 +1336,7 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "The METERED booking to end and settle.",
             "format": "uuid",
             "type": "string"
           }
@@ -1258,10 +1361,12 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "The booking to cancel.",
             "format": "uuid",
             "type": "string"
           },
           "reason": {
+            "description": "Free-text note recorded in the audit log. It does not affect the refund.",
             "maxLength": 500,
             "type": "string"
           }
@@ -1286,6 +1391,7 @@
         "additionalProperties": false,
         "properties": {
           "additional_minutes": {
+            "description": "Minutes of extra budget to authorize at the listing's per-minute rate: 15, 30 or 60.",
             "enum": [
               15,
               30,
@@ -1294,6 +1400,7 @@
             "type": "number"
           },
           "booking_id": {
+            "description": "The METERED booking whose running session to extend.",
             "format": "uuid",
             "type": "string"
           }
@@ -1318,6 +1425,7 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "The METERED booking to report on.",
             "format": "uuid",
             "type": "string"
           }
@@ -1431,6 +1539,7 @@
         "additionalProperties": false,
         "properties": {
           "billing_mode": {
+            "description": "FIXED (default): upfront pricing. METERED: per-minute session billing, for remote-access listings only; requires hourly_rate_usd.",
             "enum": [
               "FIXED",
               "METERED"
@@ -1438,6 +1547,7 @@
             "type": "string"
           },
           "booking_type": {
+            "description": "REQUEST: the owner approves each booking. INSTANT: renters are confirmed without approval; a physical INSTANT listing needs a street address, which the agent API cannot set. Drafts default to INSTANT.",
             "enum": [
               "INSTANT",
               "REQUEST"
@@ -1445,6 +1555,40 @@
             "type": "string"
           },
           "category": {
+            "description": "Listing category. Remote access is available only for AI_COMPUTE, AI_INFRASTRUCTURE and IOT_SENSORS; robots, drones and 3D printers are physical rentals.",
+            "enum": [
+              "EXCAVATORS",
+              "LOADERS_SKID_STEERS",
+              "CRANES_LIFTS",
+              "EARTHMOVING",
+              "COMPACTION",
+              "PAVEMENT_HIGHWAY",
+              "TRAILERS",
+              "GENERATORS_POWER",
+              "AIR_PUMPS",
+              "CONCRETE_MASONRY",
+              "TRENCHING_BORING",
+              "WELDING_METALWORK",
+              "POWER_TOOLS",
+              "OIL_GAS",
+              "DRONES_TECH",
+              "SCAFFOLDING_ACCESS",
+              "MOWERS_LANDSCAPING",
+              "FARMING",
+              "UTV",
+              "TELEHANDLER",
+              "TREE_CARE",
+              "FORESTRY",
+              "DUMPSTERS",
+              "ATTACHMENTS",
+              "ROBOTICS_AI",
+              "AI_COMPUTE",
+              "AI_INFRASTRUCTURE",
+              "ADDITIVE_MANUFACTURING",
+              "IOT_SENSORS",
+              "HUMANOID_ROBOTS",
+              "OTHER"
+            ],
             "type": "string"
           },
           "city": {
@@ -1465,6 +1609,7 @@
             "type": "number"
           },
           "deposit_display_usd": {
+            "description": "Deposit figure displayed on the listing, in USD. RIGShare never holds or charges it on its own; it is the most RIGShare will collect if a renter expressly accepts a damage claim. 0 = the owner requires no deposit; omit to state no figure. Must be within the bound set by replacement_value_usd. Not used on remote-access listings.",
             "maximum": 1000,
             "minimum": 0,
             "type": "number"
@@ -1474,11 +1619,13 @@
             "type": "string"
           },
           "draft_session_id": {
+            "description": "Resume key. Omit on the first save: the server generates one and returns it. Pass that value on every later save to update the same draft until it is published; each save without it creates a new draft.",
             "maxLength": 128,
             "minLength": 8,
             "type": "string"
           },
           "hourly_rate_usd": {
+            "description": "Hourly rate in USD. Required for billing_mode METERED, where it is the rate the per-minute meter bills at.",
             "maximum": 100000,
             "minimum": 0,
             "type": "number"
@@ -1498,8 +1645,10 @@
           },
           "remote_access": {
             "additionalProperties": false,
+            "description": "Network access for AI compute, AI infrastructure or IoT sensor listings. Omit for physical equipment.",
             "properties": {
               "access_type": {
+                "description": "How renters connect.",
                 "enum": [
                   "SSH",
                   "JUPYTER",
@@ -1509,10 +1658,12 @@
                 "type": "string"
               },
               "endpoint": {
+                "description": "https URL of the owner's service that renter sessions connect to.",
                 "format": "uri",
                 "type": "string"
               },
               "max_concurrent": {
+                "description": "Maximum simultaneous renter sessions.",
                 "maximum": 1000,
                 "minimum": 1,
                 "type": "integer"
@@ -1522,9 +1673,11 @@
                 "type": "string"
               },
               "require_mfa": {
+                "description": "Require renters to pass TOTP multi-factor authentication to start a session (default true). Agents cannot start sessions on such listings.",
                 "type": "boolean"
               },
               "specs": {
+                "description": "Hardware specs shown to renters.",
                 "maxLength": 2000,
                 "type": "string"
               }
@@ -1532,11 +1685,13 @@
             "type": "object"
           },
           "replacement_value_usd": {
+            "description": "What the item costs to replace, in USD. Required to publish a physical (non-remote) listing. It bounds the deposit figure the listing may display: 10% of this value, at least $25 and at most $1,000.",
             "maximum": 5000000,
             "minimum": 50,
             "type": "number"
           },
           "state": {
+            "description": "Two-letter US state code, e.g. TX.",
             "type": "string"
           },
           "title": {
@@ -1555,6 +1710,7 @@
             "type": "integer"
           },
           "zip": {
+            "description": "5-digit or ZIP+4 US postal code.",
             "type": "string"
           }
         },
@@ -1574,6 +1730,7 @@
         "additionalProperties": false,
         "properties": {
           "booking_id": {
+            "description": "Booking UUID (the booking_id returned by rigshare_create_booking).",
             "format": "uuid",
             "type": "string"
           }
@@ -1597,6 +1754,7 @@
         "additionalProperties": false,
         "properties": {
           "session_id": {
+            "description": "Session UUID, from rigshare_start_session, rigshare_list_my_sessions or rigshare_get_booking.",
             "format": "uuid",
             "type": "string"
           }
@@ -1622,13 +1780,16 @@
         "additionalProperties": false,
         "properties": {
           "draft_id": {
+            "description": "The draft_id returned by rigshare_save_draft_listing.",
             "format": "uuid",
             "type": "string"
           },
           "ownership_ack": {
+            "description": "The owner's attestation that they own or are authorized to rent the equipment and that it is in safe working condition.",
             "type": "boolean"
           },
           "security_ack": {
+            "description": "Remote-access drafts: the owner's attestation that the endpoint is secured and that they accept the Terms and Liability Waiver.",
             "type": "boolean"
           }
         },

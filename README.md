@@ -27,34 +27,34 @@ owner's behalf, and never steps up to MFA.
 |---|---|---|
 | `rigshare_quote_booking` | `bookings:read` | Dry-run price for exact dates — nothing is charged. Refuses a 4-hour start past 4:00 PM local up front |
 | `rigshare_create_booking` | `bookings:write` | Creates the booking (both divisions). Server computes every price; returns confirmation + `next_action` (who acts next, and the URL) |
-| `rigshare_get_booking` | `bookings:read` | Poll one booking: status, payment settled?, active session, `next_action` — owner approves → renter pays at the URL → confirmed |
+| `rigshare_get_booking` | `bookings:read` | Poll one booking: status, payment settled?, active session, `next_action` (who acts next, and the URL). Request-to-book: owner approves → renter pays at the URL → confirmed. Instant-book: the renter pays at the URL right away |
 | `rigshare_list_my_bookings` | `bookings:read` | The authed user's bookings |
 | `rigshare_cancel_booking` | `bookings:write` | Cancel; refund computed server-side per the published policy |
-| `rigshare_check_availability` | `equipment:read` | Unavailability blocks for a listing |
 
 **Listing (owner side):**
 
 | Tool | Required scope | What it does |
 |---|---|---|
-| `rigshare_save_draft_listing` | `equipment:write` | Save a half-finished listing as a DRAFT (both divisions); idempotent per `draft_session_id`. Include `replacement_value_usd` for a physical listing (caps the displayable deposit; the server may require it to publish) |
+| `rigshare_save_draft_listing` | `equipment:write` | Save a half-finished listing as a DRAFT (both divisions); idempotent per `draft_session_id` (a re-save changes only the fields you pass). Include `replacement_value_usd` for a physical listing (caps the displayable deposit; the server may require it to publish) |
 | `rigshare_publish_listing` | `equipment:write` | Publish a draft through the same gate as the apps (identity, payout setup, camera photo, moderation). Gate failures come back as codes the agent relays |
 | `rigshare_create_listing` | `equipment:write` | Create-and-publish in one call when the owner is already verified and has photos |
-| `rigshare_sync_availability` | `equipment:write` | Push an ERP / fleet calendar's blocks onto a listing |
+| `rigshare_check_availability` | `equipment:read` | Unavailability blocks on one of your own listings, looked up by its `external_id` |
+| `rigshare_sync_availability` | `equipment:write` | Push an ERP / fleet calendar's blocks onto one of your listings (replaces the previously synced blocks) |
 
 **Remote sessions (Robotics & AI):**
 
 | Tool | Required scope | What it does |
 |---|---|---|
-| `rigshare_start_session` | `sessions:write` | Create + start a remote session on a CONFIRMED booking; returns the one-time access token and connect handoff. MFA-protected listings must be started from the web/mobile app |
+| `rigshare_start_session` | `sessions:write` | Create + start a remote session on a CONFIRMED booking; returns the one-time access token and connect handoff. A repeat call while the session is live returns that session. Needs the rental agreement signed by both parties; MFA-protected listings must be started from the web/mobile app |
 | `rigshare_get_session` | `sessions:read` | Status, health, usage, metered budget vs billed, latest telemetry |
 | `rigshare_get_session_usage` | `sessions:read` | Live budget snapshot for a METERED booking |
-| `rigshare_extend_session` | `sessions:write` | Raise the authorized budget (money path — confirm with the renter) |
+| `rigshare_extend_session` | `sessions:write` | Raise the authorized budget (money path — confirm with the renter). Needs auto-pay enabled on the key and stays within the key's spend caps |
 | `rigshare_end_session` | `sessions:write` | Stop the per-minute meter; settles exact usage |
 | `rigshare_list_my_sessions` | `sessions:read` | Active + historical sessions |
 
 Read-only tools hit the public API (100 req/min/IP). Authenticated
 tools call the `/api/v1/agent/*` and `/api/v1/*` endpoints using Bearer
-auth and respect the API key's configured scopes + budget caps.
+auth and respect the API key's scopes and, where set, its spend caps.
 
 ## Use cases
 
@@ -168,7 +168,7 @@ Then point your MCP client at the local build by changing the config:
 
 ## Environment variables
 
-- `RIGSHARE_API_KEY` — **Optional**. Enables the 16 authenticated tools. Without it, those tools return a descriptive error and the 4 read-only tools still work. Get a key at https://www.rigshare.app/profile#api-keys or email support@rigshare.app.
+- `RIGSHARE_API_KEY` — **Optional**. Enables the 16 authenticated tools. Without it, those tools return a descriptive error and the 4 read-only tools still work. Create a key at https://www.rigshare.app/enterprise (API keys need a Pro or Enterprise plan) or email support@rigshare.app.
 - `RIGSHARE_BASE` — override the RIGShare host that every API base below derives from. Defaults to `https://www.rigshare.app`.
 - `RIGSHARE_API_BASE` — override the public API base URL. Defaults to `https://www.rigshare.app/api/public/v1`.
 - `RIGSHARE_AGENT_API_BASE` — override the authenticated agent API base URL. Defaults to `https://www.rigshare.app/api/v1/agent`.
@@ -191,7 +191,7 @@ Then point your MCP client at the local build by changing the config:
 ```
 
 The scope each authenticated tool requires is listed in the tables under
-[What it does](#what-it-does). Keys can be scoped narrowly (read-only) or broadly (read+write+booking), and you can set per-key daily/monthly budget caps. Manage at https://www.rigshare.app/profile#api-keys.
+[What it does](#what-it-does). Keys can be scoped narrowly (read-only) or broadly (read+write+booking). A key can also carry an optional per-transaction spend cap and an optional daily spend cap (there is no monthly cap). A new key has neither cap and has auto-pay off; neither is set from the key page, so contact support@rigshare.app about them. Create and revoke keys at https://www.rigshare.app/enterprise.
 
 ## How the data flows
 
@@ -214,24 +214,31 @@ The authenticated tools require a RIGShare API key set via the
 `RIGSHARE_API_KEY` env var. Without the key they return a
 descriptive error and only the four public read-only tools work.
 
-Get an API key at https://www.rigshare.app/profile#api-keys or
-email support@rigshare.app. Keys are scoped (`equipment:read`,
-`equipment:write`, `bookings:read`, `bookings:write`, `sessions:read`,
-`sessions:write`) and carry configurable per-transaction and daily
-budget caps.
+Create an API key at https://www.rigshare.app/enterprise (API keys need
+a Pro or Enterprise plan) or email support@rigshare.app. Keys are scoped
+(`equipment:read`, `equipment:write`, `bookings:read`, `bookings:write`,
+`sessions:read`, `sessions:write`) and can carry an optional
+per-transaction spend cap and an optional daily spend cap. A booking is
+checked against them before sales tax is added. A new key has neither.
 
 **The human stays in the loop for money.** A booking created by an
-agent is paid by the renter at the booking URL after the owner
-approves (unless auto-pay is enabled on the key by its owner); a
-listing is published only after the owner completes identity
+agent is paid by the renter at the booking URL: right away on an
+instant-book listing, after the owner approves on a request-to-book
+listing. The exception is auto-pay: when it is enabled on the key, an
+instant-book booking is paid with the renter's saved card as it is
+created (a per-minute listing's budget is authorized as a card hold).
+Auto-pay is off on a new key, and extending a session's budget needs
+it. A listing is published only after the owner completes identity
 verification and payout setup in the app; a remote session on
 MFA-protected equipment must be started from the web or mobile app.
 `rigshare_get_booking` always tells the agent who has to act next.
 
 **Start times for short rentals.** For `FOUR_HOURS` bookings send
 `start_date` / `end_date` as ISO date-times with a UTC offset in the
-equipment's local time — a date-only start is refused, and the session
-must start by 4:00 PM local. `HOURLY` bookings are billed per whole
+equipment's local time; the session must start by 4:00 PM local. A
+date-only start is read as UTC midnight: it is usually refused, but in
+Pacific time in winter, Alaska and Hawaii it books a four-hour block on
+the previous afternoon. `HOURLY` bookings are billed for every started
 hour between the two instants, so send real date-times there as well.
 
 The full authenticated-API surface is documented at

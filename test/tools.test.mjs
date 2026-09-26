@@ -377,6 +377,220 @@ console.log("\n[e2] publish_listing contract:");
   check("publish: gate code + hint reach the agent", gateRes.isError === true && gateTxt.includes("[ID_NOT_VERIFIED]") && gateTxt.includes("identity verification"));
 }
 
+// ── (e3) Rendered text never invents a deposit or a final refund ─────
+console.log("\n[e3] honest money rendering:");
+{
+  const booking = {
+    id: "b-1", confirmationCode: "RS-1", status: "PENDING", billingMode: "FIXED",
+    startDate: "2026-10-01T15:00:00Z", endDate: "2026-10-02T15:00:00Z", durationType: "DAILY",
+    totalAmount: 10700, securityDeposit: 0, equipment: { title: "Mini excavator", category: "EXCAVATORS" },
+  };
+  mockFetch({ success: true, data: { bookings: [booking] } });
+  const noField = textOf(await client.callTool({ name: "rigshare_list_my_bookings", arguments: {} }));
+  check("list_my_bookings: the legacy $0 deposit is not rendered as the owner's deposit",
+    noField.includes("Total: $107.00") && !noField.includes("Deposit"));
+
+  mockFetch({ success: true, data: { bookings: [{ ...booking, depositDisplayCents: null }] } });
+  const nullField = textOf(await client.callTool({ name: "rigshare_list_my_bookings", arguments: {} }));
+  check("list_my_bookings: null displayed deposit reads as none stated, not $0",
+    nullField.includes("Deposit: none stated by the owner") && !nullField.includes("$0.00"));
+
+  mockFetch({ success: true, data: { bookings: [{ ...booking, depositDisplayCents: 25000 }] } });
+  const figure = textOf(await client.callTool({ name: "rigshare_list_my_bookings", arguments: {} }));
+  check("list_my_bookings: a displayed figure is labelled never held",
+    figure.includes("Deposit (displayed, never held): $250.00"));
+
+  mockFetch({
+    success: true,
+    data: {
+      booking_id: "33333333-3333-4333-8333-333333333333", cancelled: true, declined: false, status: "CANCELLED",
+      billing_mode: "FIXED", refund: { amount_cents: 0, amount_usd: 0, retained_cents: 0, retained_usd: 0, status: "refund_pending" },
+      deposit: { had_hold: false, disposition: "none", amount_cents: 0, amount_usd: 0 },
+    },
+  });
+  const pending = textOf(await client.callTool({
+    name: "rigshare_cancel_booking",
+    arguments: { booking_id: "33333333-3333-4333-8333-333333333333" },
+  }));
+  check("cancel_booking: refund_pending says the amounts are not final",
+    pending.includes("Refund status: PENDING") && pending.includes("not final"));
+
+  mockFetch({ success: true, data: { equipment: { id: "eq-9", status: "ACTIVE", title: "Mini excavator", photos: ["https://x/1.jpg"] } } });
+  const upsert = textOf(await client.callTool({
+    name: "rigshare_create_listing",
+    arguments: {
+      title: "Mini excavator", description: "Well kept 3.5 ton mini excavator", category: "EXCAVATORS",
+      make: "Kubota", model: "U35", year: 2021, condition: "GOOD", daily_rate_usd: 300,
+      replacement_value_usd: 40000, city: "Austin", state: "TX", zip: "78701",
+      photos: ["https://example.com/1.jpg"], external_id: "SKU-1",
+    },
+  }));
+  check("create_listing: an external_id match is reported as an update, not a new listing",
+    upsert.includes("Existing listing updated") && !upsert.includes("Listing created"));
+}
+
+// ── (e4) Money and calendar writes say only what the server did ──────
+console.log("\n[e4] extend / sync / booking / listing rendering:");
+{
+  const BID = "44444444-4444-4444-8444-444444444444";
+
+  // A hold was placed but the new total could not be re-read: null is unknown,
+  // never $0.00.
+  mockFetch({
+    success: true,
+    data: {
+      booking_id: BID, extended: true, added_minutes: 30,
+      added_authorization_cents: 1500, added_authorization_usd: 15,
+      new_authorized_budget_cents: null, new_authorized_budget_usd: null,
+    },
+  });
+  const extNull = textOf(await client.callTool({
+    name: "rigshare_extend_session",
+    arguments: { booking_id: BID, additional_minutes: 30 },
+  }));
+  check("extend: added hold rendered", extNull.includes("Additional authorization hold: $15.00"));
+  check("extend: unknown new total is not rendered as $0.00",
+    extNull.includes("could not be read back") && !extNull.includes("$0.00"));
+
+  mockFetch(
+    { error: "Auto-pay is not enabled for this API key. The renter can extend the session from the booking page." },
+    { ok: false, status: 403 },
+  );
+  const ext403 = await client.callTool({
+    name: "rigshare_extend_session",
+    arguments: { booking_id: BID, additional_minutes: 15 },
+  });
+  check("extend: 403 relays the server reason and says no hold was placed",
+    ext403.isError === true &&
+      textOf(ext403).includes("Auto-pay is not enabled") &&
+      textOf(ext403).includes("No hold was placed"));
+
+  mockFetch({ error: "An internal error occurred" }, { ok: false, status: 500 });
+  const ext500 = await client.callTool({
+    name: "rigshare_extend_session",
+    arguments: { booking_id: BID, additional_minutes: 15 },
+  });
+  check("extend: a 500 makes no claim about the hold", !textOf(ext500).includes("No hold was placed"));
+
+  // sync_availability: offset times go out as UTC; bad blocks never reach the API.
+  let captured = null;
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    calls++;
+    captured = JSON.parse(init?.body || "{}");
+    return {
+      ok: true, status: 200,
+      json: async () => ({ success: true, data: { summary: { blocks_created: 1, conflicts: 0 }, results: [{ external_id: "SKU-1", status: "synced", blocks_created: 1, blocks_conflicting: 0 }] } }),
+    };
+  };
+  await client.callTool({
+    name: "rigshare_sync_availability",
+    arguments: { external_id: "SKU-1", blocks: [{ starts_at: "2026-09-15T08:00:00-05:00", ends_at: "2026-09-15T17:00:00-05:00" }] },
+  });
+  const sent = captured?.items?.[0]?.blocks?.[0] || {};
+  check("sync: offset date-times are sent as UTC",
+    sent.starts_at === "2026-09-15T13:00:00.000Z" && sent.ends_at === "2026-09-15T22:00:00.000Z");
+
+  calls = 0;
+  const noOffset = await client.callTool({
+    name: "rigshare_sync_availability",
+    arguments: { external_id: "SKU-1", blocks: [{ starts_at: "2026-09-15T08:00:00", ends_at: "2026-09-15T17:00:00" }] },
+  });
+  check("sync: a time without Z or an offset is refused before any request",
+    noOffset.isError === true && calls === 0 && textOf(noOffset).includes("Nothing was synced"));
+
+  const backwards = await client.callTool({
+    name: "rigshare_sync_availability",
+    arguments: { external_id: "SKU-1", blocks: [{ starts_at: "2026-09-15T17:00:00Z", ends_at: "2026-09-15T08:00:00Z" }] },
+  });
+  check("sync: a block that ends before it starts is refused before any request",
+    backwards.isError === true && calls === 0 && textOf(backwards).includes("ends_at must be after starts_at"));
+
+  mockFetch({ success: true, data: { summary: { blocks_created: 0, conflicts: 0 }, results: [{ external_id: "SKU-1", status: "error", error: "Failed to sync availability for item", blocks_created: 0, blocks_conflicting: 0 }] } });
+  const itemErr = await client.callTool({
+    name: "rigshare_sync_availability",
+    arguments: { external_id: "SKU-1", blocks: [] },
+  });
+  check("sync: an item error is an error, not a 'REPLACED' success",
+    itemErr.isError === true && !textOf(itemErr).includes("REPLACED"));
+
+  // create_booking on an instant-book listing without auto-pay: no approval step.
+  mockFetch({
+    success: true,
+    data: {
+      booking_id: BID, confirmation_code: "RS-9", status: "APPROVED", total_amount: 10700,
+      billing_mode: "FIXED", deposit_display_cents: null,
+      payment: { status: "pending", auto_pay: false, error: null },
+    },
+  });
+  const instant = textOf(await client.callTool({
+    name: "rigshare_create_booking",
+    arguments: {
+      equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00",
+      end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI",
+    },
+  }));
+  check("create_booking: an APPROVED (instant-book) booking is not told to wait for the owner",
+    instant.includes("no owner approval is needed") && !instant.includes("after the owner approves"));
+
+  // create_booking replay while the original's auto-pay is still running: never "pay now".
+  mockFetch({
+    success: true,
+    data: {
+      booking_id: BID, confirmation_code: "RS-9", status: "APPROVED", idempotent: true,
+      payment: { settled: false, status: "pending" },
+      next_action: { code: "AWAIT_START", actor: "none", description: "Payment in progress — do not pay again. The original request for this booking is still completing." },
+    },
+  });
+  const replay = textOf(await client.callTool({
+    name: "rigshare_create_booking",
+    arguments: {
+      equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00",
+      end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI",
+    },
+  }));
+  check("create_booking: a duplicate replay says nothing new was booked, and never tells the agent to pay while payment is in progress",
+    replay.includes("nothing new was booked or charged") && replay.includes("do not pay again") && !replay.includes("completes checkout at the booking URL now") && !replay.startsWith("Booking created"));
+
+  // A replay of a booking paid by hand never says "via auto-pay"; a failed one still says pay.
+  mockFetch({ success: true, data: { booking_id: BID, confirmation_code: "RS-9", status: "CONFIRMED", idempotent: true, payment: { settled: true, status: "paid" }, next_action: { code: "AWAIT_START", actor: "none", description: "Booked." } } });
+  const paidReplay = textOf(await client.callTool({ name: "rigshare_create_booking", arguments: { equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00", end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI" } }));
+  mockFetch({ success: true, data: { booking_id: BID, confirmation_code: "RS-9", status: "APPROVED", idempotent: true, payment: { settled: false, status: "failed" }, next_action: { code: "PAY", actor: "renter", description: "Complete payment." } } });
+  const failedReplay = textOf(await client.callTool({ name: "rigshare_create_booking", arguments: { equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00", end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI" } }));
+  mockFetch({ success: true, data: { booking_id: BID, confirmation_code: "RS-9", status: "PENDING", idempotent: true, payment: { settled: false, status: "pending" }, next_action: { code: "AWAIT_OWNER_APPROVAL", actor: "owner", description: "Waiting for the owner to approve." } } });
+  const pendingReplay = textOf(await client.callTool({ name: "rigshare_create_booking", arguments: { equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00", end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI" } }));
+  check("create_booking: a replay decides on the next-action code — settled says settled (no 'auto-pay' claim), PAY says none recorded, a request-to-book says the owner approves first",
+    paidReplay.includes("already settled") && !paidReplay.includes("auto-pay") && failedReplay.includes("none has been recorded yet") && pendingReplay.includes("owner approves the request first") && !pendingReplay.includes("do not pay again"));
+  const badKey = await client.callTool({ name: "rigshare_create_booking", arguments: { equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00", end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI", idempotency_key: "reserva-grúa-lunes" } });
+  check("create_booking: a non-ASCII idempotency_key is refused by the tool with a message naming the rule",
+    badKey.isError === true && /printable ASCII/.test(textOf(badKey)));
+
+  // create_booking: an identical booking with a different key is a 409 that names it.
+  mockFetch({ success: false, error: "An identical booking was just created for this renter: RS-9 (booking_id x, https://www.rigshare.app/booking/x). This request did not create or charge anything new.", code: "IDENTICAL_BOOKING_RECENT", booking_id: BID, url: "https://www.rigshare.app/booking/x" }, { ok: false, status: 409 });
+  const conflict = await client.callTool({
+    name: "rigshare_create_booking",
+    arguments: {
+      equipment_id: "55555555-5555-4555-8555-555555555555", start_date: "2026-10-01T08:00:00-05:00",
+      end_date: "2026-10-02T08:00:00-05:00", duration_type: "DAILY", coverage_path: "BYOCOI", idempotency_key: "new-key",
+    },
+  });
+  check("create_booking: a 409 IDENTICAL_BOOKING_RECENT is an error that names the existing booking",
+    conflict.isError === true && textOf(conflict).includes("RS-9") && textOf(conflict).includes("did not create or charge"));
+
+  // create_listing: an AI_COMPUTE listing links to the Robotics & AI page.
+  mockFetch({ success: true, data: { equipment: { id: "eq-ai", status: "ACTIVE", title: "H100 node", category: "AI_COMPUTE", billing_mode: "FIXED" }, photos_ingested: 1 } });
+  const aiListing = textOf(await client.callTool({
+    name: "rigshare_create_listing",
+    arguments: {
+      title: "H100 node", description: "Single H100 80GB node", category: "AI_COMPUTE",
+      make: "NVIDIA", model: "H100", year: 2024, condition: "EXCELLENT", daily_rate_usd: 400,
+      city: "Austin", state: "TX", zip: "78701", photos: ["https://example.com/1.jpg"],
+    },
+  }));
+  check("create_listing: AI_COMPUTE links to /robotics-ai/equipment/",
+    aiListing.includes("Live at: https://www.rigshare.app/robotics-ai/equipment/eq-ai"));
+}
+
 // ── (f) Owner-onboarding renders LIVE /policy values when reachable ──
 console.log("\n[f] Owner-onboarding renders LIVE /policy values:");
 // Distinct-from-bundled values prove the copy is sourced from /policy, not the

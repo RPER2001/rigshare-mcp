@@ -9,9 +9,64 @@ Dates are the UTC day each version was published to npm. A few version
 numbers were used for development milestones that were never published on
 their own; those entries say which published release first included them.
 
-## [2.1.1] — 2026-09-25
+## [2.1.2] — 2026-09-28
 
-No change to tool names, input or output schemas, annotations, resources or
+No tool, parameter, output field, annotation, resource or prompt was added,
+removed or renamed: existing MCP client configurations keep working unchanged.
+
+### Changed
+- `rigshare_create_booking`: `idempotency_key` must be printable ASCII (up to 100 characters); a UUID works. The server refuses anything else.
+- `rigshare_create_booking`: a request that matches a booking you created a few minutes ago now says that nothing new was booked or charged, shows that booking's payment state, and never tells you to pay while a payment is in progress. A different `idempotency_key` for an identical booking gets a clear conflict naming the existing booking; reusing a key for a different booking is refused.
+- Tool and parameter descriptions were rewritten to match what the RIGShare
+  API actually does: what each tool does, when not to use it, what each
+  parameter means, and what it does not return.
+- `category` on `rigshare_create_listing` and `rigshare_save_draft_listing`
+  lists the accepted values. Any other value is refused before a request is
+  sent; RIGShare already refused it.
+- API keys are created at https://www.rigshare.app/enterprise and need a Pro
+  or Enterprise plan. Earlier copy pointed to a profile page that has no
+  API-key section.
+- Spend caps are described as they are: an optional per-transaction cap and
+  an optional daily cap, neither set on a new key, and a booking is checked
+  against them before sales tax. There is no monthly cap.
+- `rigshare_extend_session` documents when it is refused: auto-pay is off on
+  the API key (as it is on a new key), the extension would go over a spend
+  cap, or the key is invalid, revoked or expired. For those refusals the tool
+  says that no hold was placed.
+- `rigshare_sync_availability` sends date-times that carry a UTC offset as
+  UTC. A time with no offset, or a block that ends before it starts, is
+  refused up front with a message naming the block; RIGShare refuses the
+  whole sync for either.
+- `rigshare_create_booking` explains that a date-only start for a four-hour
+  booking is usually refused, but books the previous afternoon in Pacific
+  time in winter, Alaska and Hawaii.
+
+### Fixed
+- `rigshare_extend_session` no longer shows a new total budget of $0.00 when
+  RIGShare could not report it. It says the total is unknown and to check
+  `rigshare_get_session_usage` instead of extending again.
+- `rigshare_create_booking` tells the renter to pay now on an instant-book
+  listing, instead of waiting for an owner approval that never comes.
+- `rigshare_create_listing` links an `AI_COMPUTE` listing to its Robotics & AI
+  page, reports an `external_id` match as an update of the existing listing
+  (its photos are not changed), and does not call a listing that is not
+  active "live".
+- `rigshare_list_my_bookings` shows the owner's displayed deposit (none
+  stated, none required, or the figure) instead of a $0.00 deposit.
+- `rigshare_cancel_booking` says when the owner declined a request, and that
+  the amounts are not final while a refund is pending.
+- `rigshare_publish_listing` no longer says `PHOTO_REVIEW_UNAVAILABLE` always
+  clears on retry: it usually does, but if it keeps failing the owner should
+  replace the photos or contact support.
+- `rigshare_sync_availability` reports a failed sync as an error that changed
+  nothing, instead of as a success.
+- `rigshare_start_session` no longer says a new session was started when it
+  returned the session already live on the booking.
+- Owner onboarding and the offline fallback copy no longer list Afterpay.
+
+## [2.1.1] — not published
+
+Never published on its own; these changes first ship in 2.1.2. No change to tool names, input or output schemas, annotations, resources or
 prompts: existing MCP client configurations keep working unchanged.
 
 ### Changed
