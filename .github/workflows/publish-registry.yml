@@ -1,0 +1,42 @@
+# Publishes server.json to the official MCP Registry under io.github.rigshare-hq/*.
+#
+# Runs ONLY in the public rigshare-hq/rigshare-mcp repo (this file is mirrored
+# there automatically) and only when an org owner presses
+# "Run workflow". GitHub Actions OIDC proves the repo's owner (rigshare-hq), so
+# no personal token is involved. The npm package for the version in server.json
+# must already be published, or the registry rejects the entry.
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: github.repository == 'rigshare-hq/rigshare-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher 1.8.1 (checksum-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o mcp-publisher.tar.gz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Check the npm package for this version exists
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./server.json').version")
+          npm view "rigshare-mcp@${VERSION}" version
+
+      - name: Sign in with GitHub OIDC and publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
