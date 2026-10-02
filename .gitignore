@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.npmrc
+*.tgz
+# The lockfile is not committed for this package; `npm install` regenerates it.
+package-lock.json

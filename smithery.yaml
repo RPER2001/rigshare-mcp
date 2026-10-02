@@ -1,0 +1,42 @@
+# Smithery / Glama one-click install config for rigshare-mcp.
+#
+# Picked up by:
+#   - smithery.ai when it crawls the package
+#   - glama.ai/mcp/servers to enable the "Install Server" button
+#   - any other MCP discovery surface that follows the Smithery spec
+#
+# With this file, those platforms generate the MCP client config
+# automatically and (optionally) prompt the user for their API key.
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    title: RIGShare MCP Configuration
+    description: >-
+      Optional RIGShare API key. Leave blank to use the 4 public
+      read-only tools only. Supply a key to enable the 16 authenticated
+      tools (booking, listing, availability and remote sessions), each
+      limited to the scopes granted to the key. Create a key at
+      https://www.rigshare.app/enterprise (API keys need a Pro or
+      Enterprise plan).
+    properties:
+      apiKey:
+        type: string
+        title: RIGShare API Key
+        description: >-
+          Bearer key, starts with rigs_live_. Optional. Only needed
+          for the authenticated tools. Stored by your MCP client and
+          passed to the server as RIGSHARE_API_KEY.
+        format: password
+    required: []
+  commandFunction: |
+    (config) => ({
+      command: 'npx',
+      args: ['-y', 'rigshare-mcp'],
+      env: config.apiKey
+        ? { RIGSHARE_API_KEY: config.apiKey }
+        : {}
+    })
+  exampleConfig:
+    apiKey: rigs_live_example_get_a_real_one_at_rigshare_app
