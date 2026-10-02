@@ -76,7 +76,7 @@ const RIGSHARE_V1_API =
 // the user at rigshare.app for API key setup.
 const RIGSHARE_API_KEY = process.env.RIGSHARE_API_KEY;
 // Keep in sync with package.json "version".
-const VERSION = "2.1.2";
+const VERSION = "2.2.0";
 const USER_AGENT = `rigshare-mcp/${VERSION}`;
 // Bounded per-request timeout — a stalled endpoint must never block a tool.
 const FETCH_TIMEOUT_MS = 10_000;

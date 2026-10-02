@@ -1,17 +1,17 @@
 {
   "name": "rigshare-mcp",
-  "version": "2.1.2",
-  "mcpName": "io.github.RPER2001/rigshare",
+  "version": "2.2.0",
+  "mcpName": "io.github.rigshare-hq/rigshare",
   "description": "Rent GPUs, robots, drones, and construction gear on RIGShare; also onboards equipment owners.",
   "author": "RIGShare LLC <support@rigshare.app>",
   "license": "MIT",
-  "homepage": "https://github.com/RPER2001/rigshare-mcp",
+  "homepage": "https://github.com/rigshare-hq/rigshare-mcp",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RPER2001/rigshare-mcp.git"
+    "url": "git+https://github.com/rigshare-hq/rigshare-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/RPER2001/rigshare-mcp/issues",
+    "url": "https://github.com/rigshare-hq/rigshare-mcp/issues",
     "email": "support@rigshare.app"
   },
   "keywords": [

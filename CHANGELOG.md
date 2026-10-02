@@ -11,6 +11,14 @@ their own; those entries say which published release first included them.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-02
+
+### Changed
+- The source repository moved to github.com/rigshare-hq/rigshare-mcp; the old
+  address redirects. The Official MCP Registry name changed from
+  `io.github.RPER2001/rigshare` to `io.github.rigshare-hq/rigshare` (the
+  GitHub-namespace name must match the owning account).
+
 ### Added
 - `category` on `rigshare_create_listing` and `rigshare_save_draft_listing`
   accepts two new construction categories: `SAFETY_TRAFFIC_CONTROL` (traffic
@@ -29,7 +37,9 @@ their own; those entries say which published release first included them.
   the new `connection` field that `rigshare_list_my_sessions` returns for each
   session. No tool or parameter was added, removed or renamed.
 
-## [2.1.2] — 2026-09-28
+## [2.1.2] — not published
+
+Never published on its own; these changes first ship in 2.2.0.
 
 No tool, parameter, output field, annotation, resource or prompt was added,
 removed or renamed: existing MCP client configurations keep working unchanged.
@@ -86,7 +96,7 @@ removed or renamed: existing MCP client configurations keep working unchanged.
 
 ## [2.1.1] — not published
 
-Never published on its own; these changes first ship in 2.1.2. No change to tool names, input or output schemas, annotations, resources or
+Never published on its own; these changes first ship in 2.2.0 (via 2.1.2, also unpublished). No change to tool names, input or output schemas, annotations, resources or
 prompts: existing MCP client configurations keep working unchanged.
 
 ### Changed

@@ -140,7 +140,7 @@ npx -y rigshare-mcp
 
 ```bash
 # Clone this repo
-git clone https://github.com/RPER2001/rigshare-mcp.git
+git clone https://github.com/rigshare-hq/rigshare-mcp.git
 cd rigshare-mcp
 
 npm install
@@ -247,7 +247,7 @@ https://www.rigshare.app/openapi.json.
 ## Registry listing
 
 This server is published to the **Official MCP Registry** as
-`io.github.RPER2001/rigshare`. Search for it in your MCP client, or
+`io.github.rigshare-hq/rigshare`. Search for it in your MCP client, or
 verify directly:
 
 ```bash
